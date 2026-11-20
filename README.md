@@ -23,8 +23,11 @@ MediaPipe CDN).
 | --- | --- |
 | Thumb + index of both hands | Portal appears between them |
 | Snap your fingers | Next effect, rippling out from your fingers |
-| Flick your hands apart fast | Effect goes full screen |
+| Flick your hands apart fast | Effect goes full screen (or tap **full**) |
 | Bring your hands back close | Back to the normal portal |
+
+On a phone: prop it up (portrait or landscape both work) and step back so both hands fit
+in the frame.
 
 A snap needs the mic to hear the click **and** the camera to see thumb + middle finger
 pressed together, so talking or typing won't trigger it.

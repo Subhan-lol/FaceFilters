@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, user-scalable=no">
 <title>portal.run</title>
 <style>
   :root {
@@ -15,8 +15,10 @@
   html, body {
     margin: 0; height: 100%; background: #000; color: var(--g); overflow: hidden;
     font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+    touch-action: none; overscroll-behavior: none;
+    -webkit-user-select: none; user-select: none; -webkit-tap-highlight-color: transparent;
   }
-  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  canvas { position: fixed; left: 0; top: 0; display: block; }   /* sized in JS */
   #ov { pointer-events: none; }
   #rc { display: none; }
   .hidden { display: none !important; }
@@ -81,6 +83,16 @@
     opacity: 0; transition: opacity .3s;
   }
   #toast.show { opacity: 1; }
+  .mobile-only { display: none; }
+  body.mobile .mobile-only { display: list-item; }
+  #start { overflow-y: auto; touch-action: pan-y; }
+  @media (max-width: 600px) {
+    .panel { padding: 20px 18px 16px; }
+    .prompt { font-size: 22px; }
+    #bar { bottom: calc(10px + env(safe-area-inset-bottom)); gap: 2px; padding: 4px; }
+    #bar button { padding: 7px 8px; font-size: 11px; }
+    #hint { bottom: auto; top: 22%; white-space: normal; text-align: center; width: max-content; max-width: calc(100vw - 32px); }
+  }
   #drop {
     position: fixed; inset: 12px; z-index: 20; border: 2px dashed var(--g); border-radius: 14px;
     display: grid; place-items: center; background: rgba(0, 0, 0, .6); font-size: 18px; pointer-events: none;
@@ -101,6 +113,7 @@
       <li>hold up both hands: thumb + index of each hand are the 4 corners</li>
       <li>flick your hands apart fast to go full screen, bring them back close for normal</li>
       <li>snap your fingers to switch the effect (allow the mic so it can hear you)</li>
+      <li class="mobile-only">on a phone: prop it up and step back so both hands fit in the frame</li>
     </ol>
     <div class="row">
       <button id="btnCam" class="primary">start camera</button>
@@ -115,6 +128,7 @@
   <div id="fxs"></div>
   <div class="sep"></div>
   <button id="bRec" title="record (R)">● rec</button>
+  <button id="bFull" title="lock full screen effect (E)">full</button>
   <button id="bHud" title="toggle HUD (H)">hud</button>
   <button id="bFs" title="fullscreen (F)">fullscreen</button>
 </div>
@@ -133,11 +147,13 @@ const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmark
 const FX = ['ascii', 'comic', 'thermal', 'neon', 'pixel'];
 const GLYPHS = '.,:;-=+*ox#%&@';      // dark -> bright
 // full screen = flick your hands apart FAST; bring them back close = normal
-// (hand distance is measured as a fraction of the screen diagonal)
-const FLICK_DELTA = 0.22;             // hands must move apart by this much...
-const FLICK_WINDOW = 400;             // ...within this many ms
-const FLICK_MIN_END = 0.34;           // and end up at least this far apart
-const CLOSE_SPREAD = 0.26;            // closer than this while full screen -> back to normal
+// (hand distance is measured in screen widths/heights, so a narrow portrait phone
+//  behaves the same as a wide laptop screen)
+const FLICK_DELTA = 0.28;             // hands must move apart by this much...
+const FLICK_WINDOW = 500;             // ...within this many ms
+const FLICK_MIN_END = 0.5;            // and end up at least this far apart
+const CLOSE_SPREAD = 0.38;            // closer than this while full screen -> back to normal
+const MOBILE = matchMedia('(pointer: coarse)').matches || /Android|iPhone|iPad|iPod/i.test(navigator.userAgent);
 const MIN_CUTOFF = 1.2, BETA = 6;     // one-euro smoothing
 
 const $ = (s) => document.querySelector(s);
@@ -156,8 +172,17 @@ const S = {
 
 const video = document.createElement('video');
 video.playsInline = true; video.muted = true; video.autoplay = true;
-Object.assign(video.style, { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' });
-document.body.append(video);
+video.setAttribute('playsinline', ''); video.setAttribute('muted', '');
+// full-size but hidden under the (opaque) canvas: iPhones stop updating tiny / invisible videos
+Object.assign(video.style, { position: 'fixed', left: '0', top: '0', width: '100%', height: '100%', objectFit: 'cover', pointerEvents: 'none' });
+document.body.prepend(video);
+
+// know exactly when the camera delivers a new frame (some phone browsers update currentTime late)
+let frameReady = false, lastProc = 0;
+if ('requestVideoFrameCallback' in HTMLVideoElement.prototype) {
+  const onFrame = () => { frameReady = true; video.requestVideoFrameCallback(onFrame); };
+  video.requestVideoFrameCallback(onFrame);
+}
 
 // ---------------------------------------------------------------------------
 // one-euro filter (keeps the corners steady without lag)
@@ -311,6 +336,8 @@ float sdSeg(vec2 p, vec2 a, vec2 b) {
 
 void main() {
   vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+  vec2 uv0 = toUV(p);
+  bool inVid = uv0.x >= 0.0 && uv0.x <= 1.0 && uv0.y >= 0.0 && uv0.y <= 1.0;
   vec3 col = vid(p);
   if (uMask > 0.001) {
     bool inside = false;
@@ -337,6 +364,7 @@ void main() {
       col = mix(col, f, m);
     }
   }
+  if (!inVid) col = vec3(0.0);
   outColor = vec4(col, 1.0);
 }`;
 
@@ -387,18 +415,25 @@ function buildAtlas() {
 // ---------------------------------------------------------------------------
 // layout
 // ---------------------------------------------------------------------------
-let W = 0, H = 0, dpr = 1;
+let W = 0, H = 0, dpr = 1, quality = 1;
 const Lay = { ox: 0, oy: 0, dw: 1, dh: 1 };
 function resize() {
-  dpr = Math.min(window.devicePixelRatio || 1, 2);
-  W = Math.round(innerWidth * dpr); H = Math.round(innerHeight * dpr);
-  glc.width = ov.width = W; glc.height = ov.height = H;
+  const iw = window.innerWidth, ih = window.innerHeight;
+  // phones: don't render at full retina res, the hand tracker needs that GPU time
+  const budget = MOBILE ? 0.75e6 : 2.5e6;
+  dpr = Math.max(0.5, Math.min(window.devicePixelRatio || 1, 2, Math.sqrt(budget / (iw * ih))) * quality);
+  W = Math.round(iw * dpr); H = Math.round(ih * dpr);
+  for (const c of [glc, ov]) { c.width = W; c.height = H; c.style.width = `${iw}px`; c.style.height = `${ih}px`; }
   gl.viewport(0, 0, W, H);
   buildAtlas();
+  spreadHist.length = 0;   // screen shape changed: old distances no longer comparable
 }
 function fitVideo() {
   const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
-  const s = Math.max(W / vw, H / vh);            // cover the screen
+  // normally cover the screen; if the camera is sideways to the screen (landscape feed on a
+  // portrait phone), show the whole frame instead of a thin zoomed-in strip
+  const mismatch = (W < H) !== (vw < vh);
+  const s = mismatch ? Math.min(W / vw, H / vh) : Math.max(W / vw, H / vh);
   Lay.dw = vw * s; Lay.dh = vh * s; Lay.ox = (W - Lay.dw) / 2; Lay.oy = (H - Lay.dh) / 2;
 }
 // landmark (video-normalized) -> screen-normalized
@@ -417,7 +452,8 @@ async function loadModel() {
   const opts = (delegate) => ({
     baseOptions: { modelAssetPath: MODEL_URL, delegate },
     runningMode: 'VIDEO', numHands: 2,
-    minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+    // a bit more forgiving than the defaults, so fast / blurry phone frames don't drop the hands
+    minHandDetectionConfidence: 0.4, minHandPresenceConfidence: 0.4, minTrackingConfidence: 0.35,
   });
   try { landmarker = await HandLandmarker.createFromOptions(fileset, opts('GPU')); S.delegate = 'gpu'; }
   catch { landmarker = await HandLandmarker.createFromOptions(fileset, opts('CPU')); S.delegate = 'cpu'; }
@@ -452,7 +488,7 @@ function processHands(res, ts) {
   single = hs.length === 1 ? hs[0] : null;
   if (hs.length < 2) {
     hasQuad = false;
-    spreadHist.length = 0;
+    flickFrames = 0;          // keep spreadHist: phones often lose the hands for a frame mid-flick
     if (ts - lastSeen > 0.25) resetTracking();
     return;
   }
@@ -465,18 +501,19 @@ function processHands(res, ts) {
   lastSeen = ts;
 
   // flick detection: did the hands fly apart fast just now?
-  const ca = { x: (a.t.x + a.i.x) / 2 * W, y: (a.t.y + a.i.y) / 2 * H };
-  const cb = { x: (b.t.x + b.i.x) / 2 * W, y: (b.t.y + b.i.y) / 2 * H };
-  spread = Math.hypot(ca.x - cb.x, ca.y - cb.y) / Math.hypot(W, H);
+  const ca = { x: (a.t.x + a.i.x) / 2, y: (a.t.y + a.i.y) / 2 };
+  const cb = { x: (b.t.x + b.i.x) / 2, y: (b.t.y + b.i.y) / 2 };
+  spread = Math.hypot(ca.x - cb.x, ca.y - cb.y);
   const tMs = ts * 1000;
   spreadHist.push({ t: tMs, s: spread });
   while (spreadHist.length && tMs - spreadHist[0].t > FLICK_WINDOW) spreadHist.shift();
   let lo = spreadHist[0];
   for (const h of spreadHist) if (h.s < lo.s) lo = h;
-  // must hold for 2 frames in a row, so a one-frame tracking glitch can't trigger it
   const wide = spread - lo.s >= FLICK_DELTA && spread >= FLICK_MIN_END;
+  // a real flick passes through in-between positions; a tracking glitch jumps straight there
+  const ramped = wide && spreadHist.some((h) => h.t > lo.t && h.t < tMs && h.s > lo.s + FLICK_DELTA * 0.25 && h.s < spread - FLICK_DELTA * 0.1);
   flickFrames = wide ? flickFrames + 1 : 0;
-  if (flickFrames >= 2 && tMs - flickAt > 600) { flickAt = tMs; flickFrames = 0; spreadHist.length = 0; }
+  if ((flickFrames >= 2 || ramped) && tMs - flickAt > 600) { flickAt = tMs; flickFrames = 0; spreadHist.length = 0; }
 
   const raw = [a.i, b.i, b.t, a.t];
   const f = raw.map((p, k) => ({ x: filt[2 * k].filter(p.x, ts), y: filt[2 * k + 1].filter(p.y, ts) }));
@@ -530,7 +567,7 @@ async function initMic() {
       audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
     });
   } catch { snap.mode = 'cam'; return false; }
-  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const ctx = snap.ctx || new (window.AudioContext || window.webkitAudioContext)();
   const src = ctx.createMediaStreamSource(snap.mic);
   const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1500; hp.Q.value = 0.7;
   const an = ctx.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0;
@@ -650,7 +687,7 @@ function drawSnapFx(now) {
   if (lk < 1) {
     octx.save();
     octx.globalAlpha = lk < 0.1 ? lk / 0.1 : lk > 0.7 ? (1 - lk) / 0.3 : 1;
-    octx.font = `bold ${Math.round(30 * dpr)}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
+    octx.font = `bold ${Math.round((W / dpr < 700 ? 22 : 30) * dpr)}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
     octx.textAlign = 'center'; octx.textBaseline = 'middle';
     octx.shadowColor = 'rgba(80, 255, 170, 0.9)'; octx.shadowBlur = 18 * dpr;
     octx.fillStyle = '#d9ffe9';
@@ -689,7 +726,7 @@ function drawOverlay(presence, now) {
     strokeGlow(pts, true, presence);
     octx.save();
     octx.globalAlpha = presence;
-    octx.font = mono(11); octx.textBaseline = 'middle';
+    octx.font = mono(W / dpr < 700 ? 9 : 11); octx.textBaseline = 'middle';
     for (const p of pts) {
       octx.shadowColor = 'rgba(80, 255, 220, 1)'; octx.shadowBlur = 10 * dpr;
       octx.strokeStyle = 'rgba(220, 255, 250, 0.95)'; octx.lineWidth = 1.4 * dpr;
@@ -715,8 +752,9 @@ function drawOverlay(presence, now) {
 
 let tStart = performance.now(), renderFps = 0, camFps = 0, expanded = false;
 function drawHud() {
-  const x = Math.round(14 * dpr), lh = Math.round(16 * dpr);
-  let y = Math.round(20 * dpr);
+  const fs = W / dpr < 700 ? 8.5 : 11.5;      // smaller on phones
+  const x = Math.round(14 * dpr), lh = Math.round(fs * 1.4 * dpr);
+  let y = Math.round((W / dpr < 700 ? 14 : 20) * dpr);
   const q = quadN && hasQuad ? `[${quadN.map((p) => `(${fmt(p.x)}, ${fmt(p.y)})`).join(', ')}]` : '-';
   const lines = [
     `> portal.run --fx=${FX[S.fx]}  t=${((performance.now() - tStart) / 1000).toFixed(2)}s  render ${renderFps} fps  cam ${camFps} fps  ${video.videoWidth}x${video.videoHeight}`,
@@ -728,7 +766,7 @@ function drawHud() {
     ? `snap: mic+cam  |  mic peak ${snap.level.toFixed(3)} / thr ${snap.thr.toFixed(3)}  |  pose ${ready}  |  snaps ${snap.count}`
     : `snap: ${snap.mode === 'cam' ? 'camera only (no mic)' : 'off'}  |  pose ${ready}  |  snaps ${snap.count}`);
   octx.save();
-  octx.font = mono(11.5); octx.textBaseline = 'middle'; octx.textAlign = 'left';
+  octx.font = mono(fs); octx.textBaseline = 'middle'; octx.textAlign = 'left';
   octx.shadowColor = 'rgba(0, 0, 0, 0.55)'; octx.shadowBlur = 3 * dpr;
   lines.forEach((s, i) => {
     octx.fillStyle = i === 0 ? 'rgba(140, 255, 190, 0.95)' : 'rgba(110, 240, 165, 0.7)';
@@ -743,6 +781,7 @@ function drawHud() {
 let presence = 0, expandV = 0, lastNow = performance.now(), lastVT = -1;
 let frames = 0, camFrames = 0, fpsAt = performance.now();
 const ease = (t) => t * t * (3 - 2 * t);
+const hintEl = $('#hint');
 const maskArr = new Float32Array(8);
 
 function frame(now) {
@@ -751,8 +790,8 @@ function frame(now) {
   if (!S.running) return;
 
   fitVideo();
-  if (video.readyState >= 2 && video.currentTime !== lastVT) {
-    lastVT = video.currentTime;
+  if (video.readyState >= 2 && (frameReady || video.currentTime !== lastVT || now - lastProc > 100)) {
+    frameReady = false; lastVT = video.currentTime; lastProc = now;
     camFrames++;
     gl.bindTexture(gl.TEXTURE_2D, texV);
     gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
@@ -769,9 +808,9 @@ function frame(now) {
   // fade the portal in/out, expand when stretched wide
   presence += ((hasQuad ? 1 : 0) - presence) * Math.min(1, dt * (hasQuad ? 14 : 7));
   if (S.lock) expanded = true;
-  else if (hasQuad && now - lastToggle > 600) {
-    if (!expanded && now - flickAt < 200) { expanded = true; lastToggle = now; flickAt = -1e9; onExpandToggle(true); }
-    else if (expanded && spread < CLOSE_SPREAD) { expanded = false; lastToggle = now; onExpandToggle(false); }
+  else if (now - lastToggle > 600) {
+    if (!expanded && now - flickAt < 250) { expanded = true; lastToggle = now; flickAt = -1e9; onExpandToggle(true); }
+    else if (expanded && hasQuad && spread < CLOSE_SPREAD) { expanded = false; lastToggle = now; onExpandToggle(false); }
   }
   expandV += ((expanded ? 1 : 0) - expandV) * Math.min(1, dt * (expanded ? 7 : 5));
   if (Math.abs(expandV - (expanded ? 1 : 0)) < 0.002) expandV = expanded ? 1 : 0;
@@ -815,13 +854,17 @@ function frame(now) {
   }
 
   if (hasQuad) lastQuadAt = now;
-  $('#hint').classList.toggle('show', !hasQuad && e < 0.5 && now - lastQuadAt > 2500);
+  const hintText = now - lastQuadAt > 8000 ? 'not seeing both hands: step back so they fit in the frame' : 'show both hands ✋ ✋ thumbs + index fingers';
+  if (hintEl.textContent !== hintText) hintEl.textContent = hintText;
+  hintEl.classList.toggle('show', !hasQuad && e < 0.5 && now - lastQuadAt > 2500);
 
   frames++;
   if (now - fpsAt >= 1000) {
     renderFps = Math.round(frames * 1000 / (now - fpsAt));
     camFps = Math.round(camFrames * 1000 / (now - fpsAt));
     frames = camFrames = 0; fpsAt = now;
+    // device struggling? drop render resolution so hand tracking keeps its speed
+    if (document.hasFocus() && now - tStart > 4000 && renderFps < 20 && quality > 0.55) { quality *= 0.85; resize(); }
   }
 }
 
@@ -877,6 +920,7 @@ function setFx(i) { switchFx(i); }
 function syncBar() {
   [...$('#fxs').children].forEach((b, i) => b.classList.toggle('on', i === S.fx));
   $('#bHud').classList.toggle('on', S.hud);
+  $('#bFull').classList.toggle('on', S.lock);
   $('#bRec').classList.toggle('live', !!recorder);
   $('#bRec').textContent = recorder ? '■ stop' : '● rec';
   $('#recBadge').classList.toggle('hidden', !recorder);
@@ -885,6 +929,13 @@ bar.addEventListener('click', () => document.activeElement?.blur());   // so Spa
 $('#bRec').onclick = toggleRec;
 $('#bHud').onclick = () => { S.hud = !S.hud; syncBar(); };
 $('#bFs').onclick = toggleFs;
+$('#bFull').onclick = toggleLock;
+function toggleLock() {
+  S.lock = !S.lock;
+  if (!S.lock) expanded = false;
+  onExpandToggle(S.lock);
+  syncBar();
+}
 function toggleFs() {
   if (document.fullscreenElement) document.exitFullscreen();
   else document.documentElement.requestFullscreen?.().catch(() => {});
@@ -922,7 +973,7 @@ addEventListener('keydown', (ev) => {
   else if (k === 'r') toggleRec();
   else if (k === 'h') { S.hud = !S.hud; syncBar(); }
   else if (k === 'm') { S.mirror = !S.mirror; resetTracking(); toast(`mirror ${S.mirror ? 'on' : 'off'}`); }
-  else if (k === 'e') { S.lock = !S.lock; if (!S.lock) expanded = false; toast(S.lock ? 'full screen locked (E to release)' : 'full screen released'); }
+  else if (k === 'e') toggleLock();
   else if (k === 'f') toggleFs();
   else return;
   wake();
@@ -963,6 +1014,9 @@ async function begin(mirror) {
 }
 
 async function startCamera() {
+  // iPhones only allow audio to start inside the tap itself, so create it right now
+  if (!snap.ctx) { try { snap.ctx = new (window.AudioContext || window.webkitAudioContext)(); } catch {} }
+  snap.ctx?.resume?.().catch(() => {});
   setBusy(true); setStatus('requesting camera…');
   let stream;
   try {
@@ -1014,6 +1068,10 @@ if (!gl) {
     initGL();
     resize();
     addEventListener('resize', resize);
+    window.visualViewport?.addEventListener('resize', resize);
+    addEventListener('orientationchange', () => setTimeout(resize, 300));
+    if (MOBILE) document.body.classList.add('mobile');
+    if (!document.documentElement.requestFullscreen) $('#bFs').classList.add('hidden');   // iPhone Safari
     requestAnimationFrame(frame);
     ensureModel().catch(() => {});            // start downloading the model right away
     const src = params.get('src');

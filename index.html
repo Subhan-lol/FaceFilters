@@ -1,0 +1,1029 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>portal.run</title>
+<style>
+  :root {
+    --g: #62ffa6;
+    --g2: rgba(98, 255, 166, .6);
+    --line: rgba(98, 255, 166, .22);
+    --panel: rgba(5, 13, 10, .88);
+  }
+  * { box-sizing: border-box; }
+  html, body {
+    margin: 0; height: 100%; background: #000; color: var(--g); overflow: hidden;
+    font: 13px/1.5 ui-monospace, "Cascadia Mono", Consolas, Menlo, monospace;
+  }
+  canvas { position: fixed; inset: 0; width: 100vw; height: 100vh; display: block; }
+  #ov { pointer-events: none; }
+  #rc { display: none; }
+  .hidden { display: none !important; }
+
+  #start {
+    position: fixed; inset: 0; z-index: 10; display: grid; place-items: center; padding: 16px;
+    background: radial-gradient(ellipse at 50% 40%, #0b1f17 0%, #020403 70%);
+  }
+  .panel {
+    width: min(560px, 100%); padding: 28px 28px 22px; border-radius: 10px;
+    border: 1px solid var(--line); background: var(--panel);
+    box-shadow: 0 0 60px rgba(98, 255, 166, .08), inset 0 0 40px rgba(98, 255, 166, .04);
+  }
+  .prompt { font-size: 26px; color: #d9ffe9; text-shadow: 0 0 12px rgba(98, 255, 166, .6); }
+  .cursor { animation: blink 1s steps(1) infinite; }
+  @keyframes blink { 50% { opacity: 0; } }
+  .sub { margin: 6px 0 18px; color: var(--g2); }
+  ol { margin: 0 0 22px; padding-left: 20px; color: #bfeed3; }
+  li { margin: 4px 0; }
+  .row { display: flex; gap: 10px; flex-wrap: wrap; }
+  button, .ghost {
+    font: inherit; cursor: pointer; border-radius: 6px; padding: 10px 16px;
+    border: 1px solid var(--g); background: transparent; color: var(--g); transition: background .15s, filter .15s;
+  }
+  button:disabled { opacity: .5; cursor: wait; }
+  .primary { background: var(--g); color: #02130a; font-weight: 700; box-shadow: 0 0 24px rgba(98, 255, 166, .35); }
+  .primary:hover { filter: brightness(1.1); }
+  .ghost:hover { background: rgba(98, 255, 166, .1); }
+  .status { margin-top: 16px; min-height: 1.5em; color: #8fdcb0; }
+  .status.err { color: #ff8080; }
+  .keys { margin-top: 14px; padding-top: 12px; border-top: 1px dashed var(--line); color: rgba(98, 255, 166, .5); font-size: 12px; }
+
+  #bar {
+    position: fixed; left: 50%; bottom: 18px; transform: translateX(-50%); z-index: 5;
+    display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; padding: 6px; border-radius: 10px;
+    width: max-content; max-width: calc(100vw - 32px);
+    border: 1px solid var(--line); background: rgba(3, 8, 6, .72); backdrop-filter: blur(8px);
+    transition: opacity .3s;
+  }
+  #bar.fade { opacity: 0; pointer-events: none; }
+  #bar button { padding: 6px 10px; font-size: 12px; border-color: transparent; color: var(--g2); white-space: nowrap; }
+  #bar button:hover { background: rgba(98, 255, 166, .1); }
+  #bar button.on { color: #02130a; background: var(--g); }
+  #bar .sep { width: 1px; background: var(--line); margin: 4px 3px; flex: none; }
+  #bar #bRec.live { color: #fff; background: #e5484d; }
+  #fxs { display: flex; flex-wrap: wrap; justify-content: center; gap: 4px; }
+  #bar button:focus { outline: none; }
+
+  #recBadge {
+    position: fixed; top: 14px; right: 16px; z-index: 5; padding: 4px 10px; border-radius: 6px;
+    background: rgba(229, 72, 77, .92); color: #fff; font-weight: 700;
+  }
+  #hint {
+    position: fixed; left: 50%; bottom: 76px; transform: translateX(-50%); z-index: 4; pointer-events: none;
+    padding: 8px 14px; border-radius: 8px; border: 1px solid var(--line); background: rgba(3, 8, 6, .6); color: #d9ffe9;
+    transition: opacity .4s; opacity: 0; white-space: nowrap;
+  }
+  #hint.show { opacity: 1; }
+  #toast {
+    position: fixed; left: 50%; top: 18px; transform: translateX(-50%); z-index: 6; pointer-events: none;
+    padding: 8px 14px; border-radius: 8px; background: rgba(3, 8, 6, .85); border: 1px solid var(--line); color: #d9ffe9;
+    opacity: 0; transition: opacity .3s;
+  }
+  #toast.show { opacity: 1; }
+  #drop {
+    position: fixed; inset: 12px; z-index: 20; border: 2px dashed var(--g); border-radius: 14px;
+    display: grid; place-items: center; background: rgba(0, 0, 0, .6); font-size: 18px; pointer-events: none;
+  }
+</style>
+</head>
+<body>
+<canvas id="gl"></canvas>
+<canvas id="ov"></canvas>
+<canvas id="rc"></canvas>
+
+<div id="start">
+  <div class="panel">
+    <div class="prompt">&gt; portal.run<span class="cursor">_</span></div>
+    <p class="sub">open a portal between your hands.</p>
+    <ol>
+      <li>allow the camera</li>
+      <li>hold up both hands: thumb + index of each hand are the 4 corners</li>
+      <li>flick your hands apart fast to go full screen, bring them back close for normal</li>
+      <li>snap your fingers to switch the effect (allow the mic so it can hear you)</li>
+    </ol>
+    <div class="row">
+      <button id="btnCam" class="primary">start camera</button>
+      <label class="ghost" id="btnFile">use a video file<input id="file" type="file" accept="video/*" hidden></label>
+    </div>
+    <div id="status" class="status"></div>
+    <div class="keys">snap / space next effect · 1-5 pick effect · R record · H hud · M mirror · E lock full screen · F fullscreen · [ ] snap sensitivity</div>
+  </div>
+</div>
+
+<div id="bar" class="hidden">
+  <div id="fxs"></div>
+  <div class="sep"></div>
+  <button id="bRec" title="record (R)">● rec</button>
+  <button id="bHud" title="toggle HUD (H)">hud</button>
+  <button id="bFs" title="fullscreen (F)">fullscreen</button>
+</div>
+<div id="recBadge" class="hidden">● REC 0:00</div>
+<div id="hint">show both hands ✋ ✋ thumbs + index fingers</div>
+<div id="toast"></div>
+<div id="drop" class="hidden">drop a video to run it through the portal</div>
+
+<script type="module">
+// ---------------------------------------------------------------------------
+// config
+// ---------------------------------------------------------------------------
+const MP_VER = '0.10.14';
+const MP_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`;
+const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
+const FX = ['ascii', 'comic', 'thermal', 'neon', 'pixel'];
+const GLYPHS = '.,:;-=+*ox#%&@';      // dark -> bright
+// full screen = flick your hands apart FAST; bring them back close = normal
+// (hand distance is measured as a fraction of the screen diagonal)
+const FLICK_DELTA = 0.22;             // hands must move apart by this much...
+const FLICK_WINDOW = 400;             // ...within this many ms
+const FLICK_MIN_END = 0.34;           // and end up at least this far apart
+const CLOSE_SPREAD = 0.26;            // closer than this while full screen -> back to normal
+const MIN_CUTOFF = 1.2, BETA = 6;     // one-euro smoothing
+
+const $ = (s) => document.querySelector(s);
+const glc = $('#gl'), ov = $('#ov'), octx = ov.getContext('2d');
+const rc = $('#rc'), rctx = rc.getContext('2d');
+const params = new URLSearchParams(location.search);
+
+const S = {
+  fx: Math.max(0, FX.indexOf((params.get('fx') || '').toLowerCase())),
+  hud: params.get('hud') !== '0',
+  mirror: true,
+  running: false,
+  delegate: '-',
+  lock: false,
+};
+
+const video = document.createElement('video');
+video.playsInline = true; video.muted = true; video.autoplay = true;
+Object.assign(video.style, { position: 'fixed', width: '1px', height: '1px', opacity: '0', pointerEvents: 'none' });
+document.body.append(video);
+
+// ---------------------------------------------------------------------------
+// one-euro filter (keeps the corners steady without lag)
+// ---------------------------------------------------------------------------
+class OneEuro {
+  constructor(minCutoff, beta, dCutoff = 1) { Object.assign(this, { minCutoff, beta, dCutoff }); this.reset(); }
+  reset() { this.x = null; this.dx = 0; this.t = 0; }
+  static a(cutoff, dt) { const tau = 1 / (2 * Math.PI * cutoff); return 1 / (1 + tau / dt); }
+  filter(v, t) {
+    if (this.x === null) { this.x = v; this.t = t; this.dx = 0; return v; }
+    const dt = Math.max(1e-3, t - this.t); this.t = t;
+    this.dx += OneEuro.a(this.dCutoff, dt) * ((v - this.x) / dt - this.dx);
+    const cutoff = this.minCutoff + this.beta * Math.abs(this.dx);
+    this.x += OneEuro.a(cutoff, dt) * (v - this.x);
+    return this.x;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// WebGL: camera + effect inside the portal
+// ---------------------------------------------------------------------------
+const gl = glc.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: false });
+
+const VS = `#version 300 es
+void main() {
+  vec2 p = vec2[3](vec2(-1.0, -1.0), vec2(3.0, -1.0), vec2(-1.0, 3.0))[gl_VertexID];
+  gl_Position = vec4(p, 0.0, 1.0);
+}`;
+
+const FS = `#version 300 es
+precision highp float;
+uniform sampler2D uVideo;
+uniform sampler2D uAtlas;
+uniform vec2 uRes;
+uniform vec4 uVid;      // ox, oy, dw, dh (px)
+uniform float uMirror;
+uniform vec2 uQ[4];     // portal polygon (px, top-left origin)
+uniform float uMask;
+uniform float uGlow;
+uniform int uFx;
+uniform float uTime;
+uniform vec2 uCell;
+uniform float uGlyphs;
+uniform float uDpr;
+uniform int uFxPrev;
+uniform vec4 uWipe;     // snap ripple: x, y, radius (px, <0 = off), ring strength
+out vec4 outColor;
+
+vec2 toUV(vec2 p) {
+  vec2 uv = (p - uVid.xy) / uVid.zw;
+  if (uMirror > 0.5) uv.x = 1.0 - uv.x;
+  return uv;
+}
+vec3 vid(vec2 p) { return texture(uVideo, clamp(toUV(p), 0.0, 1.0)).rgb; }
+float luma(vec3 c) { return dot(c, vec3(0.299, 0.587, 0.114)); }
+float hash11(float p) { p = fract(p * 0.1031); p *= p + 33.33; p *= p + p; return fract(p); }
+
+float sobel(vec2 p, float s) {
+  float tl = luma(vid(p + vec2(-s, -s))), t = luma(vid(p + vec2(0.0, -s))), tr = luma(vid(p + vec2(s, -s)));
+  float l  = luma(vid(p + vec2(-s, 0.0))),                                 r  = luma(vid(p + vec2(s, 0.0)));
+  float bl = luma(vid(p + vec2(-s, s))),  b = luma(vid(p + vec2(0.0, s))),  br = luma(vid(p + vec2(s, s)));
+  float gx = -tl - 2.0 * l - bl + tr + 2.0 * r + br;
+  float gy = -tl - 2.0 * t - tr + bl + 2.0 * b + br;
+  return length(vec2(gx, gy));
+}
+
+vec3 fxAscii(vec2 p) {
+  vec2 ci = floor(p / uCell);
+  float l = luma(vid((ci + 0.5) * uCell));
+  l = clamp((l - 0.08) * 1.35, 0.0, 1.0);
+  float gi = min(floor(l * uGlyphs), uGlyphs - 1.0);
+  float seed = hash11(ci.x * 1.731 + 4.1);
+  float rain = fract(ci.y * 0.03 - uTime * (0.15 + 0.35 * seed) + seed * 9.0);
+  float head = smoothstep(0.93, 1.0, rain);
+  float trail = smoothstep(0.35, 1.0, rain);
+  float rg = floor(hash11(ci.x * 13.1 + ci.y * 7.7 + floor(uTime * 10.0)) * uGlyphs);
+  gi = mix(gi, rg, step(0.5, head));
+  vec2 f = fract(p / uCell);
+  float g = texture(uAtlas, vec2((gi + f.x) / uGlyphs, f.y)).r;
+  vec3 green = vec3(0.30, 1.0, 0.55);
+  vec3 col = green * g * (0.28 + 0.9 * l) * (0.7 + 0.45 * trail);
+  col += vec3(0.75, 1.0, 0.88) * g * head;
+  col += vec3(0.0, 0.035, 0.02);
+  return col;
+}
+
+vec3 fxComic(vec2 p) {
+  float s = 1.5 * uDpr;
+  vec3 c = (vid(p) * 2.0 + vid(p + vec2(s, 0.0)) + vid(p - vec2(s, 0.0)) + vid(p + vec2(0.0, s)) + vid(p - vec2(0.0, s))) / 6.0;
+  float l = luma(c);
+  c = mix(vec3(l), c, 1.5);
+  c = clamp((c - 0.5) * 1.3 + 0.56, 0.0, 1.0);
+  c = floor(c * 4.0 + 0.5) / 4.0;
+  // halftone dots
+  float cell = 5.0 * uDpr;
+  vec2 q = mat2(0.7071, -0.7071, 0.7071, 0.7071) * p / cell;
+  float d = length(fract(q) - 0.5);
+  float r = 0.55 * sqrt(clamp(1.0 - l, 0.0, 1.0));
+  float dotm = 1.0 - smoothstep(r - 0.07, r + 0.07, d);
+  c *= 1.0 - 0.32 * dotm;
+  // deep shadows become ink
+  c = mix(c, vec3(0.03, 0.02, 0.04), smoothstep(0.2, 0.1, l));
+  // ink outlines
+  float e = sobel(p, 1.5 * uDpr);
+  c = mix(c, vec3(0.02), smoothstep(0.22, 0.45, e));
+  return c;
+}
+
+vec3 heat(float t) {
+  t = clamp(t, 0.0, 1.0) * 5.0;
+  vec3 c0 = vec3(0.0, 0.0, 0.08), c1 = vec3(0.22, 0.0, 0.6), c2 = vec3(0.85, 0.0, 0.45);
+  vec3 c3 = vec3(1.0, 0.42, 0.0), c4 = vec3(1.0, 0.92, 0.25), c5 = vec3(1.0);
+  if (t < 1.0) return mix(c0, c1, t);
+  if (t < 2.0) return mix(c1, c2, t - 1.0);
+  if (t < 3.0) return mix(c2, c3, t - 2.0);
+  if (t < 4.0) return mix(c3, c4, t - 3.0);
+  return mix(c4, c5, t - 4.0);
+}
+vec3 fxThermal(vec2 p) {
+  float s = 3.0 * uDpr;
+  float l = (luma(vid(p)) * 2.0 + luma(vid(p + vec2(s, 0.0))) + luma(vid(p - vec2(s, 0.0))) + luma(vid(p + vec2(0.0, s))) + luma(vid(p - vec2(0.0, s)))) / 6.0;
+  float n = (hash11(p.x * 0.731 + p.y * 3.17 + floor(uTime * 24.0)) - 0.5) * 0.04;
+  return heat(pow(l, 1.15) * 1.1 + n);
+}
+
+vec3 fxNeon(vec2 p) {
+  float e = sobel(p, 1.5 * uDpr);
+  float k = smoothstep(0.08, 0.35, e);
+  vec3 hue = 0.5 + 0.5 * cos(6.2831 * (p.y / uRes.y * 0.6 + p.x / uRes.x * 0.3 - uTime * 0.15) + vec3(0.0, 2.1, 4.2));
+  return vec3(0.01, 0.01, 0.03) + hue * k * 1.5;
+}
+
+vec3 fxPixel(vec2 p) {
+  float b = 10.0 * uDpr;
+  vec2 ci = floor(p / b);
+  vec3 c = vid((ci + 0.5) * b);
+  float l = luma(c);
+  c = mix(vec3(l), c, 1.4);
+  c = clamp((c - 0.5) * 1.2 + 0.5, 0.0, 1.0);
+  c = floor(c * 3.0 + 0.5) / 3.0;
+  vec2 f = fract(p / b);
+  float grid = min(step(f.x, 0.1) + step(f.y, 0.1), 1.0);
+  return c * (1.0 - 0.25 * grid);
+}
+
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+  vec3 col = vid(p);
+  if (uMask > 0.001) {
+    bool inside = false;
+    float d = 1e9;
+    for (int i = 0; i < 4; i++) {
+      vec2 a = uQ[i], b = uQ[(i + 1) % 4];
+      if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+      d = min(d, sdSeg(p, a, b));
+    }
+    float sd = inside ? d : -d;
+    float m = smoothstep(-1.0, 1.0, sd) * uMask;
+    if (m > 0.0) {
+      int id = uFx;
+      float wd = 0.0;
+      if (uWipe.z >= 0.0) { wd = length(p - uWipe.xy) - uWipe.z; if (wd > 0.0) id = uFxPrev; }
+      vec3 f;
+      if (id == 0) f = fxAscii(p);
+      else if (id == 1) f = fxComic(p);
+      else if (id == 2) f = fxThermal(p);
+      else if (id == 3) f = fxNeon(p);
+      else f = fxPixel(p);
+      f += vec3(0.45, 1.0, 0.92) * exp(-max(sd, 0.0) / (14.0 * uDpr)) * 0.35 * uGlow;
+      if (uWipe.z >= 0.0) f += vec3(0.7, 1.0, 0.95) * exp(-abs(wd) / (6.0 * uDpr)) * uWipe.w;
+      col = mix(col, f, m);
+    }
+  }
+  outColor = vec4(col, 1.0);
+}`;
+
+let U = {}, texV, texA;
+function initGL() {
+  const sh = (type, src) => {
+    const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
+    return s;
+  };
+  const prog = gl.createProgram();
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.linkProgram(prog);
+  if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  gl.useProgram(prog);
+  for (const n of ['uVideo', 'uAtlas', 'uRes', 'uVid', 'uMirror', 'uQ', 'uMask', 'uGlow', 'uFx', 'uTime', 'uCell', 'uGlyphs', 'uDpr', 'uFxPrev', 'uWipe']) {
+    U[n] = gl.getUniformLocation(prog, n);
+  }
+  gl.bindVertexArray(gl.createVertexArray());
+  const mk = (filter) => {
+    const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MAG_FILTER, filter);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE);
+    gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([0, 0, 0, 255]));
+    return t;
+  };
+  texV = mk(gl.LINEAR); texA = mk(gl.NEAREST);
+  gl.uniform1i(U.uVideo, 0); gl.uniform1i(U.uAtlas, 1);
+}
+
+let cell = [7, 12];
+function buildAtlas() {
+  const cw = Math.round(7 * dpr), ch = Math.round(12 * dpr);
+  const c = document.createElement('canvas'); c.width = cw * GLYPHS.length; c.height = ch;
+  const x = c.getContext('2d');
+  x.fillStyle = '#000'; x.fillRect(0, 0, c.width, c.height);
+  x.fillStyle = '#fff'; x.textAlign = 'center'; x.textBaseline = 'middle';
+  x.font = `bold ${Math.round(ch * 0.92)}px Consolas, ui-monospace, monospace`;
+  for (let i = 0; i < GLYPHS.length; i++) x.fillText(GLYPHS[i], i * cw + cw / 2, ch / 2 + 0.5);
+  gl.bindTexture(gl.TEXTURE_2D, texA);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, c);
+  cell = [cw, ch];
+}
+
+// ---------------------------------------------------------------------------
+// layout
+// ---------------------------------------------------------------------------
+let W = 0, H = 0, dpr = 1;
+const Lay = { ox: 0, oy: 0, dw: 1, dh: 1 };
+function resize() {
+  dpr = Math.min(window.devicePixelRatio || 1, 2);
+  W = Math.round(innerWidth * dpr); H = Math.round(innerHeight * dpr);
+  glc.width = ov.width = W; glc.height = ov.height = H;
+  gl.viewport(0, 0, W, H);
+  buildAtlas();
+}
+function fitVideo() {
+  const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+  const s = Math.max(W / vw, H / vh);            // cover the screen
+  Lay.dw = vw * s; Lay.dh = vh * s; Lay.ox = (W - Lay.dw) / 2; Lay.oy = (H - Lay.dh) / 2;
+}
+// landmark (video-normalized) -> screen-normalized
+function toN(p) {
+  const x = S.mirror ? 1 - p.x : p.x;
+  return { x: (Lay.ox + x * Lay.dw) / W, y: (Lay.oy + p.y * Lay.dh) / H };
+}
+
+// ---------------------------------------------------------------------------
+// hands -> portal quad
+// ---------------------------------------------------------------------------
+let landmarker = null, modelPromise = null;
+async function loadModel() {
+  const { FilesetResolver, HandLandmarker } = await import(`${MP_URL}/vision_bundle.mjs`);
+  const fileset = await FilesetResolver.forVisionTasks(`${MP_URL}/wasm`);
+  const opts = (delegate) => ({
+    baseOptions: { modelAssetPath: MODEL_URL, delegate },
+    runningMode: 'VIDEO', numHands: 2,
+    minHandDetectionConfidence: 0.5, minHandPresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+  });
+  try { landmarker = await HandLandmarker.createFromOptions(fileset, opts('GPU')); S.delegate = 'gpu'; }
+  catch { landmarker = await HandLandmarker.createFromOptions(fileset, opts('CPU')); S.delegate = 'cpu'; }
+}
+function ensureModel() {
+  if (!modelPromise) modelPromise = loadModel().catch((e) => { modelPromise = null; throw e; });
+  return modelPromise;
+}
+
+const filt = Array.from({ length: 8 }, () => new OneEuro(MIN_CUTOFF, BETA));
+const DEFAULT_Q = [{ x: .4, y: .4 }, { x: .6, y: .4 }, { x: .6, y: .6 }, { x: .4, y: .6 }];
+let quadN = null, hasQuad = false, prevWrists = null, lastSeen = -1e9, lastQuadAt = 0;
+let nHands = 0, single = null, quadArea = 0, detMs = 0;
+let spread = 0, spreadHist = [], flickAt = -1e9, flickFrames = 0, lastToggle = -1e9;
+
+const d2 = (a, b) => (a.x - b.x) ** 2 + (a.y - b.y) ** 2;
+function crosses(p1, p2, p3, p4) {
+  const o = (a, b, c) => (b.x - a.x) * (c.y - a.y) - (b.y - a.y) * (c.x - a.x);
+  return (o(p3, p4, p1) > 0) !== (o(p3, p4, p2) > 0) && (o(p1, p2, p3) > 0) !== (o(p1, p2, p4) > 0);
+}
+function polyArea(q) {
+  let a = 0;
+  for (let i = 0; i < q.length; i++) { const p = q[i], n = q[(i + 1) % q.length]; a += p.x * n.y - n.x * p.y; }
+  return Math.abs(a) / 2;
+}
+function resetTracking() { filt.forEach((f) => f.reset()); prevWrists = null; }
+
+function processHands(res, ts) {
+  snapPose(res.landmarks || [], ts * 1000);
+  const hs =(res.landmarks || []).map((lm) => ({ t: toN(lm[4]), i: toN(lm[8]), w: toN(lm[0]) }));
+  nHands = hs.length;
+  single = hs.length === 1 ? hs[0] : null;
+  if (hs.length < 2) {
+    hasQuad = false;
+    spreadHist.length = 0;
+    if (ts - lastSeen > 0.25) resetTracking();
+    return;
+  }
+  let [a, b] = hs;
+  // keep each hand in the same slot frame to frame
+  if (prevWrists) {
+    if (d2(a.w, prevWrists[1]) + d2(b.w, prevWrists[0]) < d2(a.w, prevWrists[0]) + d2(b.w, prevWrists[1])) [a, b] = [b, a];
+  } else if (a.w.x > b.w.x) [a, b] = [b, a];
+  prevWrists = [a.w, b.w];
+  lastSeen = ts;
+
+  // flick detection: did the hands fly apart fast just now?
+  const ca = { x: (a.t.x + a.i.x) / 2 * W, y: (a.t.y + a.i.y) / 2 * H };
+  const cb = { x: (b.t.x + b.i.x) / 2 * W, y: (b.t.y + b.i.y) / 2 * H };
+  spread = Math.hypot(ca.x - cb.x, ca.y - cb.y) / Math.hypot(W, H);
+  const tMs = ts * 1000;
+  spreadHist.push({ t: tMs, s: spread });
+  while (spreadHist.length && tMs - spreadHist[0].t > FLICK_WINDOW) spreadHist.shift();
+  let lo = spreadHist[0];
+  for (const h of spreadHist) if (h.s < lo.s) lo = h;
+  // must hold for 2 frames in a row, so a one-frame tracking glitch can't trigger it
+  const wide = spread - lo.s >= FLICK_DELTA && spread >= FLICK_MIN_END;
+  flickFrames = wide ? flickFrames + 1 : 0;
+  if (flickFrames >= 2 && tMs - flickAt > 600) { flickAt = tMs; flickFrames = 0; spreadHist.length = 0; }
+
+  const raw = [a.i, b.i, b.t, a.t];
+  const f = raw.map((p, k) => ({ x: filt[2 * k].filter(p.x, ts), y: filt[2 * k + 1].filter(p.y, ts) }));
+  const aLeft = a.w.x <= b.w.x, nA = aLeft ? 'L' : 'R', nB = aLeft ? 'R' : 'L';
+  const ai = { ...f[0], name: `${nA}.index` }, bi = { ...f[1], name: `${nB}.index` };
+  const bt = { ...f[2], name: `${nB}.thumb` }, at = { ...f[3], name: `${nA}.thumb` };
+  quadN = crosses(ai, bi, bt, at) ? [ai, bt, bi, at] : [ai, bi, bt, at];   // never a bow-tie
+  quadArea = polyArea(quadN);
+  hasQuad = true;
+}
+
+// portal polygon, morphing toward the screen corners as it expands
+function maskPolygon(e) {
+  const q = (quadN || DEFAULT_Q).map((p) => ({ x: p.x * W, y: p.y * H }));
+  if (e <= 0.0001) return q;
+  const C = [[-2, -2], [W + 2, -2], [W + 2, H + 2], [-2, H + 2]];
+  let best = null, bestD = Infinity;
+  for (const dir of [1, -1]) {
+    for (let r = 0; r < 4; r++) {
+      let s = 0; const t = [];
+      for (let i = 0; i < 4; i++) {
+        const c = C[(((r + dir * i) % 4) + 4) % 4]; t.push(c);
+        s += (q[i].x - c[0]) ** 2 + (q[i].y - c[1]) ** 2;
+      }
+      if (s < bestD) { bestD = s; best = t; }
+    }
+  }
+  return q.map((p, i) => ({ x: p.x + (best[i][0] - p.x) * e, y: p.y + (best[i][1] - p.y) * e }));
+}
+
+// ---------------------------------------------------------------------------
+// snap detection
+//   mic hears a sharp click  +  camera saw thumb & middle finger pressed together
+//   (no mic -> camera only: pinch, then a fast release with the middle finger in the palm)
+// ---------------------------------------------------------------------------
+const SNAP_ARM = 0.45;        // thumb-to-middle gap, in palm lengths, that counts as "ready to snap"
+const snap = {
+  mode: 'off', mic: null, ctx: null, an: null, buf: null,
+  thr: loadThr(), base: 0.002, level: 0,
+  onsetAt: -1e9, consumedAt: -1e9, armedAt: -1e9, strictAt: -1e9, strictFrames: 0, pos: null,
+  lastFire: -1e9, count: 0, timer: 0,
+};
+function loadThr() { try { const v = parseFloat(localStorage.getItem('portal.snapThr')); return v > 0 ? v : 0.05; } catch { return 0.05; } }
+function saveThr() { try { localStorage.setItem('portal.snapThr', String(snap.thr)); } catch {} }
+
+async function initMic() {
+  if (snap.mic) return true;
+  try {
+    // raw audio: noise suppression would erase the click of a snap
+    snap.mic = await navigator.mediaDevices.getUserMedia({
+      audio: { echoCancellation: false, noiseSuppression: false, autoGainControl: false },
+    });
+  } catch { snap.mode = 'cam'; return false; }
+  const ctx = new (window.AudioContext || window.webkitAudioContext)();
+  const src = ctx.createMediaStreamSource(snap.mic);
+  const hp = ctx.createBiquadFilter(); hp.type = 'highpass'; hp.frequency.value = 1500; hp.Q.value = 0.7;
+  const an = ctx.createAnalyser(); an.fftSize = 1024; an.smoothingTimeConstant = 0;
+  const mute = ctx.createGain(); mute.gain.value = 0;
+  src.connect(hp); hp.connect(an); an.connect(mute); mute.connect(ctx.destination);
+  Object.assign(snap, { ctx, an, buf: new Float32Array(an.fftSize), mode: 'mic+cam' });
+  if (ctx.state === 'suspended') ctx.resume().catch(() => {});
+  clearInterval(snap.timer);
+  snap.timer = setInterval(pollMic, 15);
+  return true;
+}
+
+function pollMic() {
+  const { an, buf } = snap;
+  if (!an) return;
+  an.getFloatTimeDomainData(buf);
+  let pk = 0, ss = 0;
+  for (let i = 0; i < buf.length; i++) { const v = buf[i], a = v < 0 ? -v : v; if (a > pk) pk = a; ss += v * v; }
+  const rms = Math.sqrt(ss / buf.length);
+  const now = performance.now();
+  snap.level = Math.max(pk, snap.level * 0.85);
+  // a snap is a short, loud, high-pitched click: loud vs. the room AND spiky (peak >> average)
+  if (pk > Math.max(snap.thr, snap.base * 12) && pk > rms * 3 && now - snap.onsetAt > 150) snap.onsetAt = now;
+  snap.base += (rms - snap.base) * (rms > snap.base ? 0.01 : 0.08);
+}
+
+function snapPose(lms, nowMs) {
+  let armed = null, strict = false, released = false;
+  for (const lm of lms) {
+    const P = (k) => { const n = toN(lm[k]); return { x: n.x * W, y: n.y * H, n }; };
+    const w = P(0), palm = P(9), th = P(4), mid = P(12), ring = P(16), pinky = P(20);
+    const sc = Math.hypot(palm.x - w.x, palm.y - w.y) || 1;
+    const fromWrist = (p) => Math.hypot(p.x - w.x, p.y - w.y) / sc;
+    const gap = Math.hypot(th.x - mid.x, th.y - mid.y) / sc;
+    const curledRest = fromWrist(ring) < 1.35 && fromWrist(pinky) < 1.3;   // ring + pinky tucked in, like a real snap
+    if (gap < SNAP_ARM) {
+      armed = { x: (th.n.x + mid.n.x) / 2, y: (th.n.y + mid.n.y) / 2 };
+      if (gap < 0.4 && curledRest) strict = true;
+    } else if (gap > 0.6 && fromWrist(mid) < 1.3 && curledRest) released = true;
+  }
+  if (armed) {
+    snap.armedAt = nowMs; snap.pos = armed;
+    if (strict) { snap.strictFrames++; if (snap.strictFrames >= 2) snap.strictAt = nowMs; }
+    else snap.strictFrames = 0;
+    return;
+  }
+  snap.strictFrames = 0;
+  // camera-only fallback: held a proper snap pose, then the middle finger slapped down fast
+  if (snap.mode !== 'mic+cam' && released && nowMs - snap.strictAt < 350) {
+    snap.strictAt = -1e9;
+    fireSnap(snap.pos);
+  }
+}
+
+// mic heard a click: only counts if the snap pose was seen just before (or right after, camera lag)
+function checkSnap(now) {
+  if (snap.onsetAt <= snap.consumedAt) return;
+  const lead = snap.onsetAt - snap.armedAt;
+  if (lead < 1000 && lead > -300) { snap.consumedAt = snap.onsetAt; fireSnap(snap.pos); }
+  else if (now - snap.onsetAt > 300) snap.consumedAt = snap.onsetAt;
+}
+
+// effect switch = ripple out from the snap point
+const WIPE_MS = 550;
+const wipe = { prev: S.fx, t0: -1e9, x: 0.5, y: 0.5 };
+const bursts = [];
+let fxLabel = { text: '', t0: -1e9 };
+function switchFx(i, pos) {
+  i = (i + FX.length) % FX.length;
+  if (i === S.fx) return;
+  const now = performance.now();
+  wipe.prev = S.fx; wipe.t0 = now;
+  wipe.x = pos ? pos.x : 0.5; wipe.y = pos ? pos.y : 0.5;
+  S.fx = i;
+  fxLabel = { text: `--fx=${FX[i]}`, t0: now };
+  syncBar();
+}
+function fireSnap(pos) {
+  const now = performance.now();
+  if (now - snap.lastFire < 450) return;
+  snap.lastFire = now; snap.count++;
+  const p = pos || { x: 0.5, y: 0.5 };
+  bursts.push({ x: p.x, y: p.y, t0: now });
+  switchFx(S.fx + 1, p);
+}
+
+function onExpandToggle(on) {
+  const now = performance.now();
+  const q = quadN || DEFAULT_Q;
+  const c = { x: q.reduce((s, p) => s + p.x, 0) / q.length, y: q.reduce((s, p) => s + p.y, 0) / q.length };
+  if (on) bursts.push({ x: c.x, y: c.y, t0: now, big: true });
+  fxLabel = { text: `--expand=${on ? 'full' : 'off'}`, t0: now };
+}
+
+function drawSnapFx(now) {
+  for (let i = bursts.length - 1; i >= 0; i--) {
+    const b = bursts[i], k = Math.max(0, (now - b.t0) / (b.big ? 650 : 500));
+    if (k >= 1) { bursts.splice(i, 1); continue; }
+    const R = b.big ? 3 : 1;
+    const x = b.x * W, y = b.y * H, e = (1 - Math.pow(1 - k, 3)) * R;
+    octx.save();
+    if (k < 0.3) { octx.globalAlpha = 0.16 * (1 - k / 0.3); octx.fillStyle = '#eafff9'; octx.fillRect(0, 0, W, H); }
+    octx.globalAlpha = 1 - k;
+    octx.shadowColor = 'rgba(80, 255, 220, 1)'; octx.shadowBlur = 16 * dpr;
+    octx.strokeStyle = '#eafff9'; octx.lineWidth = 2.2 * dpr * (1 - k) + 0.6; octx.lineCap = 'round';
+    octx.beginPath(); octx.arc(x, y, (8 + 110 * e) * dpr, 0, Math.PI * 2); octx.stroke();
+    for (let j = 0; j < 10; j++) {
+      const ang = (j / 10) * Math.PI * 2 + 0.3, r0 = (14 + 60 * e) * dpr, r1 = (24 + 95 * e) * dpr;
+      octx.beginPath();
+      octx.moveTo(x + Math.cos(ang) * r0, y + Math.sin(ang) * r0);
+      octx.lineTo(x + Math.cos(ang) * r1, y + Math.sin(ang) * r1);
+      octx.stroke();
+    }
+    octx.restore();
+  }
+  const lk = Math.max(0, (now - fxLabel.t0) / 1100);
+  if (lk < 1) {
+    octx.save();
+    octx.globalAlpha = lk < 0.1 ? lk / 0.1 : lk > 0.7 ? (1 - lk) / 0.3 : 1;
+    octx.font = `bold ${Math.round(30 * dpr)}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
+    octx.textAlign = 'center'; octx.textBaseline = 'middle';
+    octx.shadowColor = 'rgba(80, 255, 170, 0.9)'; octx.shadowBlur = 18 * dpr;
+    octx.fillStyle = '#d9ffe9';
+    octx.fillText(`> ${fxLabel.text}`, W / 2, H * 0.68 - (1 - Math.min(1, lk * 6)) * 10 * dpr);
+    octx.restore();
+  }
+}
+
+// ---------------------------------------------------------------------------
+// overlay: glowing edges, corner labels, HUD
+// ---------------------------------------------------------------------------
+const mono = (px) => `${Math.round(px * dpr)}px ui-monospace, "Cascadia Mono", Consolas, monospace`;
+const fmt = (v) => v.toFixed(3);
+
+function strokeGlow(pts, closed, alpha) {
+  const path = () => {
+    octx.beginPath();
+    pts.forEach((p, i) => (i ? octx.lineTo(p.x, p.y) : octx.moveTo(p.x, p.y)));
+    if (closed) octx.closePath();
+  };
+  octx.save();
+  octx.globalAlpha = alpha;
+  octx.lineJoin = 'round'; octx.lineCap = 'round';
+  octx.shadowColor = 'rgba(80, 255, 220, 1)';
+  octx.shadowBlur = 22 * dpr; octx.strokeStyle = 'rgba(140, 255, 235, 0.5)'; octx.lineWidth = 6 * dpr; path(); octx.stroke();
+  octx.shadowBlur = 8 * dpr; octx.strokeStyle = 'rgba(235, 255, 252, 0.95)'; octx.lineWidth = 1.6 * dpr; path(); octx.stroke();
+  octx.restore();
+}
+
+function drawOverlay(presence, now) {
+  octx.clearRect(0, 0, W, H);
+  drawSnapFx(now);
+
+  if (presence > 0.01 && quadN) {
+    const pts = quadN.map((p) => ({ x: p.x * W, y: p.y * H, n: p }));
+    strokeGlow(pts, true, presence);
+    octx.save();
+    octx.globalAlpha = presence;
+    octx.font = mono(11); octx.textBaseline = 'middle';
+    for (const p of pts) {
+      octx.shadowColor = 'rgba(80, 255, 220, 1)'; octx.shadowBlur = 10 * dpr;
+      octx.strokeStyle = 'rgba(220, 255, 250, 0.95)'; octx.lineWidth = 1.4 * dpr;
+      octx.beginPath(); octx.arc(p.x, p.y, 5 * dpr, 0, Math.PI * 2); octx.stroke();
+      octx.fillStyle = '#eafff9'; octx.beginPath(); octx.arc(p.x, p.y, 1.8 * dpr, 0, Math.PI * 2); octx.fill();
+      octx.shadowColor = 'rgba(0, 0, 0, 0.6)'; octx.shadowBlur = 3 * dpr;
+      octx.fillStyle = 'rgba(120, 255, 170, 0.92)';
+      const label = `${p.n.name} ${fmt(p.n.x)}, ${fmt(p.n.y)}`;
+      const right = p.x > W - 190 * dpr;
+      octx.textAlign = right ? 'right' : 'left';
+      octx.fillText(label, p.x + (right ? -12 : 12) * dpr, p.y - 8 * dpr);
+    }
+    octx.restore();
+  }
+
+  if (single) {   // one hand up: show the pinch edge so you know it's tracking
+    const a = { x: single.t.x * W, y: single.t.y * H }, b = { x: single.i.x * W, y: single.i.y * H };
+    strokeGlow([a, b], false, 0.55);
+  }
+
+  if (S.hud) drawHud();
+}
+
+let tStart = performance.now(), renderFps = 0, camFps = 0, expanded = false;
+function drawHud() {
+  const x = Math.round(14 * dpr), lh = Math.round(16 * dpr);
+  let y = Math.round(20 * dpr);
+  const q = quadN && hasQuad ? `[${quadN.map((p) => `(${fmt(p.x)}, ${fmt(p.y)})`).join(', ')}]` : '-';
+  const lines = [
+    `> portal.run --fx=${FX[S.fx]}  t=${((performance.now() - tStart) / 1000).toFixed(2)}s  render ${renderFps} fps  cam ${camFps} fps  ${video.videoWidth}x${video.videoHeight}`,
+    `hand_landmarker: ${nHands} hand${nHands === 1 ? '' : 's'}  ${detMs.toFixed(1)} ms (${S.delegate})  |  quad area ${(hasQuad ? quadArea * 100 : 0).toFixed(1)}%  |  spread ${(hasQuad ? spread : 0).toFixed(2)}  |  expand ${expanded ? 'full' : 'off'} ${expandV.toFixed(2)}${S.lock ? ' (locked)' : ''}`,
+    `quad = ${q}  one_euro(min_cutoff=${MIN_CUTOFF}, beta=${BETA})`,
+  ];
+  const ready = performance.now() - snap.armedAt < 300 ? 'ready' : '-';
+  lines.push(snap.mode === 'mic+cam'
+    ? `snap: mic+cam  |  mic peak ${snap.level.toFixed(3)} / thr ${snap.thr.toFixed(3)}  |  pose ${ready}  |  snaps ${snap.count}`
+    : `snap: ${snap.mode === 'cam' ? 'camera only (no mic)' : 'off'}  |  pose ${ready}  |  snaps ${snap.count}`);
+  octx.save();
+  octx.font = mono(11.5); octx.textBaseline = 'middle'; octx.textAlign = 'left';
+  octx.shadowColor = 'rgba(0, 0, 0, 0.55)'; octx.shadowBlur = 3 * dpr;
+  lines.forEach((s, i) => {
+    octx.fillStyle = i === 0 ? 'rgba(140, 255, 190, 0.95)' : 'rgba(110, 240, 165, 0.7)';
+    octx.fillText(s, x, y + i * lh);
+  });
+  octx.restore();
+}
+
+// ---------------------------------------------------------------------------
+// main loop
+// ---------------------------------------------------------------------------
+let presence = 0, expandV = 0, lastNow = performance.now(), lastVT = -1;
+let frames = 0, camFrames = 0, fpsAt = performance.now();
+const ease = (t) => t * t * (3 - 2 * t);
+const maskArr = new Float32Array(8);
+
+function frame(now) {
+  requestAnimationFrame(frame);
+  const dt = Math.min(0.1, (now - lastNow) / 1000); lastNow = now;
+  if (!S.running) return;
+
+  fitVideo();
+  if (video.readyState >= 2 && video.currentTime !== lastVT) {
+    lastVT = video.currentTime;
+    camFrames++;
+    gl.bindTexture(gl.TEXTURE_2D, texV);
+    gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, gl.RGBA, gl.UNSIGNED_BYTE, video);
+    if (landmarker) {
+      const t0 = performance.now();
+      try {
+        const res = landmarker.detectForVideo(video, t0);
+        detMs = detMs * 0.8 + (performance.now() - t0) * 0.2;
+        processHands(res, t0 / 1000);
+      } catch (e) { console.warn(e); }
+    }
+  }
+
+  // fade the portal in/out, expand when stretched wide
+  presence += ((hasQuad ? 1 : 0) - presence) * Math.min(1, dt * (hasQuad ? 14 : 7));
+  if (S.lock) expanded = true;
+  else if (hasQuad && now - lastToggle > 600) {
+    if (!expanded && now - flickAt < 200) { expanded = true; lastToggle = now; flickAt = -1e9; onExpandToggle(true); }
+    else if (expanded && spread < CLOSE_SPREAD) { expanded = false; lastToggle = now; onExpandToggle(false); }
+  }
+  expandV += ((expanded ? 1 : 0) - expandV) * Math.min(1, dt * (expanded ? 7 : 5));
+  if (Math.abs(expandV - (expanded ? 1 : 0)) < 0.002) expandV = expanded ? 1 : 0;
+  const e = ease(expandV);
+
+  checkSnap(now);
+
+  const poly = maskPolygon(e);
+  poly.forEach((p, i) => { maskArr[2 * i] = p.x; maskArr[2 * i + 1] = p.y; });
+
+  gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texV);
+  gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texA);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.uniform2f(U.uRes, W, H);
+  gl.uniform4f(U.uVid, Lay.ox, Lay.oy, Lay.dw, Lay.dh);
+  gl.uniform1f(U.uMirror, S.mirror ? 1 : 0);
+  gl.uniform2fv(U.uQ, maskArr);
+  gl.uniform1f(U.uMask, Math.max(presence, e));
+  gl.uniform1f(U.uGlow, 1 - 0.85 * e);
+  gl.uniform1i(U.uFx, S.fx);
+  gl.uniform1f(U.uTime, ((now - tStart) / 1000) % 1000);
+  gl.uniform2f(U.uCell, cell[0], cell[1]);
+  gl.uniform1f(U.uGlyphs, GLYPHS.length);
+  gl.uniform1f(U.uDpr, dpr);
+  gl.uniform1i(U.uFxPrev, wipe.prev);
+  const wp = Math.max(0, (now - wipe.t0) / WIPE_MS);
+  if (wp < 1) {
+    const wx = wipe.x * W, wy = wipe.y * H;
+    const maxR = Math.max(Math.hypot(wx, wy), Math.hypot(W - wx, wy), Math.hypot(wx, H - wy), Math.hypot(W - wx, H - wy));
+    gl.uniform4f(U.uWipe, wx, wy, maxR * (1 - Math.pow(1 - wp, 3)), 0.9 * (1 - wp));
+  } else gl.uniform4f(U.uWipe, 0, 0, -1, 0);
+  gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+  drawOverlay(presence, now);
+
+  if (recorder) {
+    rctx.drawImage(glc, 0, 0, rc.width, rc.height);
+    rctx.drawImage(ov, 0, 0, rc.width, rc.height);
+    const s = Math.floor((now - recStart) / 1000);
+    $('#recBadge').textContent = `● REC ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
+  }
+
+  if (hasQuad) lastQuadAt = now;
+  $('#hint').classList.toggle('show', !hasQuad && e < 0.5 && now - lastQuadAt > 2500);
+
+  frames++;
+  if (now - fpsAt >= 1000) {
+    renderFps = Math.round(frames * 1000 / (now - fpsAt));
+    camFps = Math.round(camFrames * 1000 / (now - fpsAt));
+    frames = camFrames = 0; fpsAt = now;
+  }
+}
+
+// ---------------------------------------------------------------------------
+// recording (saves straight to Downloads)
+// ---------------------------------------------------------------------------
+let recorder = null, recChunks = [], recStart = 0, recMic = null;
+async function toggleRec() {
+  if (!S.running) return;
+  if (recorder) { recorder.stop(); return; }
+  const scale = Math.min(1, 1920 / W);
+  rc.width = Math.round(W * scale / 2) * 2; rc.height = Math.round(H * scale / 2) * 2;
+  const stream = rc.captureStream(30);
+  if (video.srcObject) {   // camera mode: record your voice too, like she does
+    if (await initMic()) { recMic = snap.mic.getAudioTracks()[0].clone(); stream.addTrack(recMic); }
+    else toast('no mic access, recording without sound');
+  }
+  const mime = ['video/mp4', 'video/webm;codecs=vp9,opus', 'video/webm'].find((t) => window.MediaRecorder && MediaRecorder.isTypeSupported(t));
+  try {
+    recorder = new MediaRecorder(stream, { mimeType: mime, videoBitsPerSecond: 10_000_000 });
+  } catch (e) { toast('recording is not supported in this browser'); return; }
+  recChunks = [];
+  recorder.ondataavailable = (ev) => ev.data.size && recChunks.push(ev.data);
+  recorder.onstop = () => {
+    const type = recorder.mimeType || mime || 'video/webm';
+    const blob = new Blob(recChunks, { type });
+    const ext = type.includes('mp4') ? 'mp4' : 'webm';
+    const d = new Date(), pad = (n) => String(n).padStart(2, '0');
+    const name = `portal-${d.getFullYear()}${pad(d.getMonth() + 1)}${pad(d.getDate())}-${pad(d.getHours())}${pad(d.getMinutes())}${pad(d.getSeconds())}.${ext}`;
+    const a = Object.assign(document.createElement('a'), { href: URL.createObjectURL(blob), download: name });
+    document.body.append(a); a.click(); a.remove();
+    setTimeout(() => URL.revokeObjectURL(a.href), 10_000);
+    recMic?.stop(); recMic = null;
+    recorder = null; syncBar();
+    toast(`saved ${name}`);
+  };
+  recorder.start(250);
+  recStart = performance.now();
+  syncBar();
+}
+
+// ---------------------------------------------------------------------------
+// UI
+// ---------------------------------------------------------------------------
+const bar = $('#bar');
+FX.forEach((n, i) => {
+  const b = document.createElement('button');
+  b.textContent = `${i + 1} ${n}`; b.title = `${n} (${i + 1})`;
+  b.onclick = () => setFx(i);
+  $('#fxs').append(b);
+});
+function setFx(i) { switchFx(i); }
+function syncBar() {
+  [...$('#fxs').children].forEach((b, i) => b.classList.toggle('on', i === S.fx));
+  $('#bHud').classList.toggle('on', S.hud);
+  $('#bRec').classList.toggle('live', !!recorder);
+  $('#bRec').textContent = recorder ? '■ stop' : '● rec';
+  $('#recBadge').classList.toggle('hidden', !recorder);
+}
+bar.addEventListener('click', () => document.activeElement?.blur());   // so Space/keys don't re-press buttons
+$('#bRec').onclick = toggleRec;
+$('#bHud').onclick = () => { S.hud = !S.hud; syncBar(); };
+$('#bFs').onclick = toggleFs;
+function toggleFs() {
+  if (document.fullscreenElement) document.exitFullscreen();
+  else document.documentElement.requestFullscreen?.().catch(() => {});
+}
+
+let idleTimer = 0;
+function wake() {
+  if (!S.running) return;
+  bar.classList.remove('fade');
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(() => bar.classList.add('fade'), 2500);
+}
+addEventListener('mousemove', wake);
+addEventListener('pointerdown', () => { if (snap.ctx?.state === 'suspended') snap.ctx.resume(); });
+addEventListener('touchstart', wake, { passive: true });
+
+let toastTimer = 0;
+function toast(msg) {
+  const t = $('#toast'); t.textContent = msg; t.classList.add('show');
+  clearTimeout(toastTimer); toastTimer = setTimeout(() => t.classList.remove('show'), 3200);
+}
+
+addEventListener('keydown', (ev) => {
+  if (!S.running || ev.ctrlKey || ev.metaKey || ev.altKey) return;
+  const k = ev.key.toLowerCase();
+  if (k >= '1' && k <= String(FX.length)) setFx(+k - 1);
+  else if (k === ' ') { ev.preventDefault(); fireSnap(null); }
+  else if (k === '[' || k === ']') {
+    snap.thr = Math.min(0.5, Math.max(0.005, snap.thr * (k === '[' ? 1.25 : 0.8)));
+    saveThr();
+    toast(`snap ${k === ']' ? 'more' : 'less'} sensitive (threshold ${snap.thr.toFixed(3)})`);
+  }
+  else if (k === 'arrowright') setFx(S.fx + 1);
+  else if (k === 'arrowleft') setFx(S.fx - 1);
+  else if (k === 'r') toggleRec();
+  else if (k === 'h') { S.hud = !S.hud; syncBar(); }
+  else if (k === 'm') { S.mirror = !S.mirror; resetTracking(); toast(`mirror ${S.mirror ? 'on' : 'off'}`); }
+  else if (k === 'e') { S.lock = !S.lock; if (!S.lock) expanded = false; toast(S.lock ? 'full screen locked (E to release)' : 'full screen released'); }
+  else if (k === 'f') toggleFs();
+  else return;
+  wake();
+});
+
+function setStatus(msg, err = false) { const s = $('#status'); s.textContent = msg; s.classList.toggle('err', err); }
+function setBusy(b) { $('#btnCam').disabled = b; $('#file').disabled = b; }
+
+function stopSource() {
+  if (video.srcObject) { video.srcObject.getTracks().forEach((t) => t.stop()); video.srcObject = null; }
+  if (video.src && video.src.startsWith('blob:')) URL.revokeObjectURL(video.src);
+  video.removeAttribute('src');
+}
+
+function camError(e) {
+  if (!navigator.mediaDevices) return 'camera API unavailable here. run start.bat and use http://localhost instead.';
+  switch (e && e.name) {
+    case 'NotAllowedError': return 'camera blocked. click the camera icon in the address bar, allow it, then hit start again.';
+    case 'NotFoundError': return 'no camera found. plug one in, or use a video file.';
+    case 'NotReadableError': return 'camera is busy. close Zoom / Teams / the Camera app and try again.';
+    default: return `camera error: ${e && (e.message || e.name)}`;
+  }
+}
+
+async function begin(mirror) {
+  S.mirror = mirror;
+  resetTracking(); quadN = null; hasQuad = false; expanded = false; expandV = 0; presence = 0;
+  try { await video.play(); } catch {}
+  if (!video.videoWidth) await new Promise((r) => video.addEventListener('loadedmetadata', r, { once: true }));
+  if (!landmarker) setStatus('loading hand model… (first time takes a few seconds)');
+  try { await ensureModel(); }
+  catch (e) { setStatus(`couldn't load the hand-tracking model. check your internet connection. (${e.message || e})`, true); setBusy(false); return; }
+  $('#start').classList.add('hidden');
+  bar.classList.remove('hidden');
+  S.running = true; tStart = performance.now(); lastQuadAt = performance.now();
+  snap.mode = snap.mic ? 'mic+cam' : 'cam';
+  syncBar(); wake();
+}
+
+async function startCamera() {
+  setBusy(true); setStatus('requesting camera…');
+  let stream;
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({
+      video: { width: { ideal: 1280 }, height: { ideal: 720 }, frameRate: { ideal: 30 }, facingMode: 'user' },
+      audio: false,
+    });
+  } catch (e) { setStatus(camError(e), true); setBusy(false); return; }
+  stopSource();
+  video.loop = false;
+  video.srcObject = stream;
+  await begin(true);
+  if (S.running && !snap.mic) {
+    toast('allow the mic too, so it can hear your snaps');
+    initMic().then((ok) => toast(ok ? 'snap your fingers to switch effects' : 'no mic: snaps are detected by camera only (less reliable)'));
+  }
+}
+
+async function startFile(src) {
+  setBusy(true); setStatus('loading video…');
+  stopSource();
+  video.loop = true;
+  video.src = src;
+  await begin(false);
+}
+
+$('#btnCam').onclick = startCamera;
+$('#file').onchange = (ev) => { const f = ev.target.files[0]; if (f) startFile(URL.createObjectURL(f)); };
+
+// drag & drop a video anywhere
+let dragDepth = 0;
+addEventListener('dragenter', (ev) => { ev.preventDefault(); dragDepth++; $('#drop').classList.remove('hidden'); });
+addEventListener('dragleave', () => { if (--dragDepth <= 0) { dragDepth = 0; $('#drop').classList.add('hidden'); } });
+addEventListener('dragover', (ev) => ev.preventDefault());
+addEventListener('drop', (ev) => {
+  ev.preventDefault(); dragDepth = 0; $('#drop').classList.add('hidden');
+  const f = [...ev.dataTransfer.files].find((x) => x.type.startsWith('video/'));
+  if (f) { S.running = false; $('#start').classList.remove('hidden'); startFile(URL.createObjectURL(f)); }
+});
+
+// ---------------------------------------------------------------------------
+// boot
+// ---------------------------------------------------------------------------
+if (!gl) {
+  setStatus('your browser has WebGL2 turned off. use Chrome or Edge with hardware acceleration on.', true);
+  setBusy(true);
+} else {
+  try {
+    initGL();
+    resize();
+    addEventListener('resize', resize);
+    requestAnimationFrame(frame);
+    ensureModel().catch(() => {});            // start downloading the model right away
+    const src = params.get('src');
+    if (src) startFile(src);
+    else setStatus('ready.');
+  } catch (e) {
+    console.error(e);
+    setStatus(`graphics error: ${e.message}`, true);
+  }
+}
+</script>
+</body>
+</html>

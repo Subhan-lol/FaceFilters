@@ -120,7 +120,7 @@
       <label class="ghost" id="btnFile">use a video file<input id="file" type="file" accept="video/*" hidden></label>
     </div>
     <div id="status" class="status"></div>
-    <div class="keys">snap / space next effect · 1-5 pick effect · R record · H hud · M mirror · E lock full screen · F fullscreen · [ ] snap sensitivity</div>
+    <div class="keys">snap / space next effect · 1-6 pick effect · R record · H hud · M mirror · E lock full screen · F fullscreen · [ ] snap sensitivity</div>
   </div>
 </div>
 
@@ -144,7 +144,9 @@
 const MP_VER = '0.10.14';
 const MP_URL = `https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@${MP_VER}`;
 const MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task';
-const FX = ['ascii', 'comic', 'thermal', 'neon', 'pixel'];
+const FACE_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/face_landmarker/face_landmarker/float16/1/face_landmarker.task';
+const FX = ['ascii', 'comic', 'thermal', 'neon', 'pixel', 'spider'];
+const SPIDER = FX.indexOf('spider');   // comic background + a mask glued to your face
 const GLYPHS = '.,:;-=+*ox#%&@';      // dark -> bright
 // full screen = flick your hands apart FAST; bring them back close = normal
 // (hand distance is measured in screen widths/heights, so a narrow portrait phone
@@ -204,7 +206,7 @@ class OneEuro {
 // ---------------------------------------------------------------------------
 // WebGL: camera + effect inside the portal
 // ---------------------------------------------------------------------------
-const gl = glc.getContext('webgl2', { antialias: false, alpha: false, preserveDrawingBuffer: false });
+const gl = glc.getContext('webgl2', { antialias: false, alpha: false, depth: true, preserveDrawingBuffer: false });
 
 const VS = `#version 300 es
 void main() {
@@ -328,6 +330,40 @@ vec3 fxPixel(vec2 p) {
   return c * (1.0 - 0.25 * grid);
 }
 
+// comic-book multiverse: purple/blue print, misregistered plates, halftone, hatching, ink
+vec3 fxSpider(vec2 p) {
+  // every so often a strip of the image tears sideways
+  float band = floor(p.y / (22.0 * uDpr));
+  float tk = floor(uTime * 9.0);
+  float tear = step(0.968, hash11(band * 7.13 + tk * 3.7));
+  p.x += tear * (hash11(band * 1.7 + tk) - 0.5) * 44.0 * uDpr;
+  float s = 1.5 * uDpr;
+  vec3 c = (vid(p) * 2.0 + vid(p + vec2(s, 0.0)) + vid(p - vec2(s, 0.0)) + vid(p + vec2(0.0, s)) + vid(p - vec2(0.0, s))) / 6.0;
+  float l = luma(c);
+  float t = clamp((l - 0.06) * 1.35, 0.0, 1.0);
+  t = floor(t * 5.0 + 0.5) / 5.0;
+  vec3 c0 = vec3(0.05, 0.02, 0.16), c1 = vec3(0.24, 0.08, 0.62), c2 = vec3(0.42, 0.28, 0.95);
+  vec3 c3 = vec3(0.40, 0.80, 1.0), c4 = vec3(1.0, 0.88, 0.97);
+  vec3 col = t < 0.25 ? mix(c0, c1, t * 4.0) : t < 0.5 ? mix(c1, c2, (t - 0.25) * 4.0)
+           : t < 0.75 ? mix(c2, c3, (t - 0.5) * 4.0) : mix(c3, c4, (t - 0.75) * 4.0);
+  // pink + cyan print plates slightly out of register
+  float o = (3.0 + 7.0 * tear) * uDpr;
+  float lr = luma(vid(p + vec2(o, o * 0.4))), lb = luma(vid(p - vec2(o, o * 0.4)));
+  col += vec3(0.95, 0.1, 0.55) * max(lr - l, 0.0) * 1.6 + vec3(0.1, 0.8, 1.0) * max(lb - l, 0.0) * 1.6;
+  // halftone dots
+  vec2 q = mat2(0.7071, -0.7071, 0.7071, 0.7071) * p / (5.0 * uDpr);
+  float d = length(fract(q) - 0.5);
+  float r = 0.5 * sqrt(clamp(1.0 - l * 1.2, 0.0, 1.0));
+  col = mix(col, col * 0.55, 1.0 - smoothstep(r - 0.07, r + 0.07, d));
+  // hatching in the shadows
+  float hatch = step(0.6, fract((p.x - p.y) / (6.0 * uDpr)));
+  col = mix(col, c0 * 0.6, hatch * smoothstep(0.22, 0.1, l) * 0.8);
+  // ink outlines
+  float e = sobel(p, 1.5 * uDpr);
+  col = mix(col, vec3(0.02, 0.0, 0.05), smoothstep(0.22, 0.45, e));
+  return col;
+}
+
 float sdSeg(vec2 p, vec2 a, vec2 b) {
   vec2 pa = p - a, ba = b - a;
   float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
@@ -358,7 +394,8 @@ void main() {
       else if (id == 1) f = fxComic(p);
       else if (id == 2) f = fxThermal(p);
       else if (id == 3) f = fxNeon(p);
-      else f = fxPixel(p);
+      else if (id == 4) f = fxPixel(p);
+      else f = fxSpider(p);
       f += vec3(0.45, 1.0, 0.92) * exp(-max(sd, 0.0) / (14.0 * uDpr)) * 0.35 * uGlow;
       if (uWipe.z >= 0.0) f += vec3(0.7, 1.0, 0.95) * exp(-abs(wd) / (6.0 * uDpr)) * uWipe.w;
       col = mix(col, f, m);
@@ -368,23 +405,251 @@ void main() {
   outColor = vec4(col, 1.0);
 }`;
 
-let U = {}, texV, texA;
-function initGL() {
+// ---------------------------------------------------------------------------
+// spider mask: a 3D face mesh drawn over your face, in its own pass
+//   vertices = the face tracker's 468 landmarks (so it bends, turns and blinks with you)
+//   + 3 rings of extra vertices that wrap a hood over your hair / ears
+//   the mask design (web, lenses, shading) is drawn procedurally in the mesh's UV space
+// ---------------------------------------------------------------------------
+const MESH_VS = `#version 300 es
+layout(location = 0) in vec3 aPos;    // screen px (top-left origin), depth px
+layout(location = 1) in vec2 aUV;
+layout(location = 2) in vec3 aNrm;    // normal in the canonical face model
+layout(location = 3) in float aEdge;  // 0 = face ... 1 = outer rim of the hood
+uniform vec2 uRes;
+uniform mat3 uRot;                    // canonical face -> screen
+uniform float uDepthScale;
+out vec2 vUV; out vec3 vN; out float vEdge;
+void main() {
+  vUV = aUV; vEdge = aEdge; vN = uRot * aNrm;
+  gl_Position = vec4(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0, clamp(aPos.z * uDepthScale, -0.999, 0.999), 1.0);
+}`;
+
+const MESH_FS = `#version 300 es
+precision highp float;
+uniform vec2 uRes;
+uniform vec2 uQ[4];
+uniform float uMask;
+uniform int uFx;
+uniform int uFxPrev;
+uniform vec4 uWipe;
+uniform float uDpr;
+uniform vec2 uEyeOpen;     // lens squint, (left-of-UV eye, right-of-UV eye)
+uniform float uAlpha;
+in vec2 vUV; in vec3 vN; in float vEdge;
+out vec4 outColor;
+
+const vec2 WEB_C = vec2(0.5, 0.585);   // web centre: bridge of the nose
+
+float sdSeg(vec2 p, vec2 a, vec2 b) {
+  vec2 pa = p - a, ba = b - a;
+  float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
+  return length(pa - ba * h);
+}
+float portalSD(vec2 p) {
+  bool inside = false; float d = 1e9;
+  for (int i = 0; i < 4; i++) {
+    vec2 a = uQ[i], b = uQ[(i + 1) % 4];
+    if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
+    d = min(d, sdSeg(p, a, b));
+  }
+  return inside ? d : -d;
+}
+
+// lens shape: big teardrop, pointed toward the nose, outer end tilted up
+// q = offset from lens centre in UV units, x pointing away from the nose. returns (field, local y)
+vec2 lens(vec2 q, float open) {
+  const float ang = 0.42;
+  vec2 r = vec2(cos(ang) * q.x + sin(ang) * q.y, -sin(ang) * q.x + cos(ang) * q.y);
+  float a = 0.126;
+  float b0 = 0.08 * mix(0.42, 1.0, smoothstep(-1.0, 0.4, clamp(r.x / a, -1.0, 1.0)));
+  float b = b0 * open;
+  r.y += b0 * (1.0 - open) * 0.55;     // squinting: the top comes down, the bottom stays
+  return vec2(length(vec2(r.x / a, r.y / b)) - 1.0, r.y / b);
+}
+
+void main() {
+  vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
+  float m = smoothstep(-1.0, 1.0, portalSD(p)) * uMask;
+  int id = uFx;
+  if (uWipe.z >= 0.0 && length(p - uWipe.xy) > uWipe.z) id = uFxPrev;
+  if (m <= 0.0 || id != ${SPIDER}) discard;
+
+  float uvpp = 0.5 * (length(dFdx(vUV)) + length(dFdy(vUV)));   // UV units per pixel
+  vec3 N = normalize(vN);
+  float facing = clamp(-N.z, 0.0, 1.0);
+
+  // cel-shaded dark suit fabric
+  vec3 L = normalize(vec3(-0.45, -0.6, -0.66));
+  float lam = clamp(dot(N, L), 0.0, 1.0);
+  vec3 cSh = vec3(0.02, 0.022, 0.06), cMid = vec3(0.065, 0.08, 0.21), cLit = vec3(0.14, 0.18, 0.43);
+  vec3 col = mix(mix(cSh, cMid, smoothstep(0.24, 0.30, lam)), cLit, smoothstep(0.66, 0.72, lam));
+  vec2 hq = mat2(0.7071, -0.7071, 0.7071, 0.7071) * p / (4.0 * uDpr);
+  float hr = 0.5 * clamp(0.85 - lam, 0.0, 1.0);
+  col = mix(col, cSh * 0.7, (1.0 - smoothstep(hr - 0.08, hr + 0.08, length(fract(hq) - 0.5))) * 0.75);
+  vec3 Hv = normalize(L + vec3(0.0, 0.0, -1.0));
+  col += vec3(0.45, 0.6, 1.0) * smoothstep(0.945, 0.96, dot(N, Hv)) * 0.35;  // comic glint
+  col += vec3(0.62, 0.15, 0.9) * pow(1.0 - facing, 2.5) * 0.5;              // magenta rim light
+
+  // web: spokes + sagging threads, thinner toward the centre
+  vec2 q = vUV - WEB_C;
+  float r = length(q);
+  const float NS = 16.0, SA = 6.2831853 / NS;
+  float a = atan(q.y, q.x) / SA;
+  float dSpoke = r * sin(abs(fract(a + 0.5) - 0.5) * SA);
+  float ft = fract(a);
+  float chord = cos(0.5 * SA) / cos((ft - 0.5) * SA);
+  float rr = r / (chord * (1.0 - 0.09 * sin(3.14159 * ft)));
+  const float G = 1.38, R0 = 0.05;
+  float lr = log(max(rr, 1e-4) / R0) / log(G);
+  float dRing = lr < -0.5 ? 1.0 : abs(fract(lr + 0.5) - 0.5) * log(G) * rr;
+  float w = 0.0028;
+  float web = (1.0 - smoothstep(w - uvpp, w + uvpp, min(dSpoke, dRing))) * smoothstep(0.012, 0.03, r);
+  col = mix(col, vec3(0.004, 0.005, 0.016), web * 0.92);
+
+  // lenses (mirror the design, each side squints on its own)
+  float side = vUV.x < 0.5 ? uEyeOpen.x : uEyeOpen.y;
+  vec2 lq = vec2(abs(vUV.x - 0.5) - 0.165, vUV.y - 0.635);
+  vec2 lf = lens(lq, side);
+  float ld = lf.x / max(fwidth(lf.x), 1e-5) * uvpp;     // ~distance to the lens edge, UV units
+  float aa = uvpp;
+  vec3 white = mix(vec3(0.78, 0.83, 0.97), vec3(1.0), smoothstep(-1.0, 0.8, lf.y));
+  vec3 ink = vec3(0.01, 0.01, 0.02), red = vec3(0.88, 0.1, 0.2);
+  vec3 lc = mix(white, ink, smoothstep(-aa, aa, ld));
+  lc = mix(lc, red, smoothstep(0.004 - aa, 0.004 + aa, ld));
+  lc = mix(lc, ink, smoothstep(0.016 - aa, 0.016 + aa, ld));
+  col = mix(lc, col, smoothstep(0.021 - aa, 0.021 + aa, ld));
+
+  // hood: soft rim where it wraps away from you
+  float al = 1.0 - smoothstep(0.8, 1.0, vEdge);
+  al *= mix(1.0, smoothstep(0.0, 0.25, facing), smoothstep(0.45, 0.7, vEdge));
+  outColor = vec4(col, al * m * uAlpha);
+}`;
+
+// canonical face model (data block at the bottom of the page) + the hood rings around it
+const FACE_OVAL = [356, 389, 251, 284, 332, 297, 338, 10, 109, 67, 103, 54, 21, 162, 127, 234, 93, 132,
+  58, 172, 136, 150, 149, 176, 148, 152, 377, 400, 378, 379, 365, 397, 288, 361, 323, 454];
+const FM = (() => {
+  const raw = JSON.parse(document.getElementById('facemesh').textContent);
+  const bin = (s) => Uint8Array.from(atob(s), (c) => c.charCodeAt(0)).buffer;
+  const P16 = new Int16Array(bin(raw.pos)), T16 = new Uint16Array(bin(raw.uv)), tri = new Uint16Array(bin(raw.tri));
+  const NF = P16.length / 3, NO = FACE_OVAL.length, NV = NF + 3 * NO;
+  const pos = new Float32Array(NF * 3), uv = new Float32Array(NF * 2);
+  for (let i = 0; i < pos.length; i++) pos[i] = P16[i] / 1000;
+  for (let i = 0; i < uv.length; i++) uv[i] = T16[i] / 65535;
+  // vertex normals, facing out of the face (+z = toward the viewer)
+  const nrm = new Float32Array(NF * 3);
+  for (let t = 0; t < tri.length; t += 3) {
+    const a = tri[t] * 3, b = tri[t + 1] * 3, c = tri[t + 2] * 3;
+    const ux = pos[b] - pos[a], uy = pos[b + 1] - pos[a + 1], uz = pos[b + 2] - pos[a + 2];
+    const vx = pos[c] - pos[a], vy = pos[c + 1] - pos[a + 1], vz = pos[c + 2] - pos[a + 2];
+    const nx = uy * vz - uz * vy, ny = uz * vx - ux * vz, nz = ux * vy - uy * vx;
+    for (const k of [a, b, c]) { nrm[k] += nx; nrm[k + 1] += ny; nrm[k + 2] += nz; }
+  }
+  const flip = nrm[4 * 3 + 2] < 0 ? -1 : 1;    // vertex 4 = nose tip, must point at the viewer
+  for (let k = 0; k < nrm.length; k += 3) {
+    const l = Math.hypot(nrm[k], nrm[k + 1], nrm[k + 2]) || 1;
+    nrm[k] *= flip / l; nrm[k + 1] *= flip / l; nrm[k + 2] *= flip / l;
+  }
+  // hood: rings from the face outline out to a head-sized ellipsoid (cm), then around the back
+  const HC = [0, 1.5, -2.0], HR = [8.4, 11.8, 10.0], WEB = [0.5, 0.585];
+  const hood = new Float32Array(3 * NO * 3);
+  const attr = new Float32Array(NV * 6);
+  for (let i = 0; i < NF; i++) attr.set([uv[2 * i], uv[2 * i + 1], nrm[3 * i], nrm[3 * i + 1], nrm[3 * i + 2], 0], i * 6);
+  const ellN = (x, y, z) => {
+    const n = [(x - HC[0]) / HR[0] ** 2, (y - HC[1]) / HR[1] ** 2, (z - HC[2]) / HR[2] ** 2];
+    const l = Math.hypot(...n) || 1; return n.map((v) => v / l);
+  };
+  FACE_OVAL.forEach((o, j) => {
+    const O = [pos[3 * o], pos[3 * o + 1], pos[3 * o + 2]];
+    const dx = O[0] - HC[0], dy = O[1] - HC[1], len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+    const tS = Math.max(1 / Math.hypot(ux / HR[0], uy / HR[1]), len + 1.2);
+    const tA = len + (tS - len) * 0.5;
+    const rings = [
+      [HC[0] + ux * tA, HC[1] + uy * tA, O[2] + (HC[2] - O[2]) * 0.5],
+      [HC[0] + ux * tS, HC[1] + uy * tS, HC[2]],
+      [HC[0] + ux * tS * 0.8, HC[1] + uy * tS * 0.8, HC[2] - 0.6 * HR[2]],
+    ];
+    rings.forEach((pt, k) => {
+      hood.set(pt, (k * NO + j) * 3);
+      let n = ellN(...pt);
+      if (k === 0) { n = n.map((v, c) => v + nrm[3 * o + c]); const l = Math.hypot(...n); n = n.map((v) => v / l); }
+      const f = [1.2, 1.42, 1.65][k];
+      attr.set([WEB[0] + (uv[2 * o] - WEB[0]) * f, WEB[1] + (uv[2 * o + 1] - WEB[1]) * f, ...n, (k + 1) / 3], (NF + k * NO + j) * 6);
+    });
+  });
+  const idx = new Uint16Array(tri.length + 3 * NO * 6);
+  idx.set(tri);
+  let w = tri.length;
+  const ringV = (k, j) => (k === 0 ? FACE_OVAL[j % NO] : NF + (k - 1) * NO + (j % NO));
+  for (let k = 0; k < 3; k++) for (let j = 0; j < NO; j++) {
+    const a = ringV(k, j), b = ringV(k, j + 1), c = ringV(k + 1, j + 1), d = ringV(k + 1, j);
+    idx.set([a, b, c, a, c, d], w); w += 6;
+  }
+  // least-squares fit canonical -> screen needs inverse(AᵀA), A rows = [x y z 1]
+  const M = Array.from({ length: 4 }, () => new Float64Array(8));
+  for (let i = 0; i < NF; i++) {
+    const r = [pos[3 * i], pos[3 * i + 1], pos[3 * i + 2], 1];
+    for (let a = 0; a < 4; a++) for (let b = 0; b < 4; b++) M[a][b] += r[a] * r[b];
+  }
+  for (let a = 0; a < 4; a++) M[a][4 + a] = 1;
+  for (let c = 0; c < 4; c++) {          // Gauss-Jordan
+    let pr = c; for (let r = c + 1; r < 4; r++) if (Math.abs(M[r][c]) > Math.abs(M[pr][c])) pr = r;
+    [M[c], M[pr]] = [M[pr], M[c]];
+    const dv = M[c][c]; for (let k = 0; k < 8; k++) M[c][k] /= dv;
+    for (let r = 0; r < 4; r++) if (r !== c) { const f = M[r][c]; for (let k = 0; k < 8; k++) M[r][k] -= f * M[c][k]; }
+  }
+  const Ginv = M.map((row) => Array.from(row.slice(4)));
+  return { NF, NO, NV, pos, hood, attr, idx, Ginv };
+})();
+
+// one face slot = smoothed landmarks + the mesh positions built from them
+const MAX_FACES = MOBILE ? 1 : 2;
+const FACE_MIN_CUTOFF = 1.5, FACE_BETA = 8;
+const faces = Array.from({ length: MAX_FACES }, () => ({
+  sm: new Float32Array(FM.NF * 3), raw: new Float32Array(FM.NF * 3), init: false, t: 0, cx: 0, cy: 0, v: 0,
+  nose: null, seenAt: -1e9, alpha: 0, ready: false,
+  geo: new Float32Array(FM.NV * 3), rot: new Float32Array(9), open: [1, 1],
+}));
+let faceLm = null, facePromise = null, faceState = 'off', nFaces = 0, faceMs = 0;
+
+let U = {}, texV, texA, prog0, vao0, MP = null;
+function link(vs, fs) {
   const sh = (type, src) => {
     const s = gl.createShader(type); gl.shaderSource(s, src); gl.compileShader(s);
     if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) throw new Error(gl.getShaderInfoLog(s));
     return s;
   };
   const prog = gl.createProgram();
-  gl.attachShader(prog, sh(gl.VERTEX_SHADER, VS));
-  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, FS));
+  gl.attachShader(prog, sh(gl.VERTEX_SHADER, vs));
+  gl.attachShader(prog, sh(gl.FRAGMENT_SHADER, fs));
   gl.linkProgram(prog);
   if (!gl.getProgramParameter(prog, gl.LINK_STATUS)) throw new Error(gl.getProgramInfoLog(prog));
+  return prog;
+}
+function initMaskGL() {
+  const prog = link(MESH_VS, MESH_FS), u = {};
+  for (const n of ['uRes', 'uRot', 'uDepthScale', 'uQ', 'uMask', 'uFx', 'uFxPrev', 'uWipe', 'uDpr', 'uEyeOpen', 'uAlpha']) u[n] = gl.getUniformLocation(prog, n);
+  const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
+  const posBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
+  gl.bufferData(gl.ARRAY_BUFFER, FM.NV * 12, gl.DYNAMIC_DRAW);
+  gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
+  const st = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, st); gl.bufferData(gl.ARRAY_BUFFER, FM.attr, gl.STATIC_DRAW);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 0);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 24, 8);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 24, 20);
+  const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, FM.idx, gl.STATIC_DRAW);
+  gl.bindVertexArray(null);
+  MP = { prog, u, vao, posBuf };
+}
+
+function initGL() {
+  const prog = prog0 = link(VS, FS);
   gl.useProgram(prog);
   for (const n of ['uVideo', 'uAtlas', 'uRes', 'uVid', 'uMirror', 'uQ', 'uMask', 'uGlow', 'uFx', 'uTime', 'uCell', 'uGlyphs', 'uDpr', 'uFxPrev', 'uWipe']) {
     U[n] = gl.getUniformLocation(prog, n);
   }
-  gl.bindVertexArray(gl.createVertexArray());
+  vao0 = gl.createVertexArray(); gl.bindVertexArray(vao0);
   const mk = (filter) => {
     const t = gl.createTexture(); gl.bindTexture(gl.TEXTURE_2D, t);
     gl.texParameteri(gl.TEXTURE_2D, gl.TEXTURE_MIN_FILTER, filter);
@@ -396,6 +661,7 @@ function initGL() {
   };
   texV = mk(gl.LINEAR); texA = mk(gl.NEAREST);
   gl.uniform1i(U.uVideo, 0); gl.uniform1i(U.uAtlas, 1);
+  initMaskGL();
 }
 
 let cell = [7, 12];
@@ -445,10 +711,18 @@ function toN(p) {
 // ---------------------------------------------------------------------------
 // hands -> portal quad
 // ---------------------------------------------------------------------------
-let landmarker = null, modelPromise = null;
+let landmarker = null, modelPromise = null, visionP = null;
+function visionBase() {
+  if (!visionP) {
+    visionP = (async () => {
+      const mod = await import(`${MP_URL}/vision_bundle.mjs`);
+      return { mod, fileset: await mod.FilesetResolver.forVisionTasks(`${MP_URL}/wasm`) };
+    })().catch((e) => { visionP = null; throw e; });
+  }
+  return visionP;
+}
 async function loadModel() {
-  const { FilesetResolver, HandLandmarker } = await import(`${MP_URL}/vision_bundle.mjs`);
-  const fileset = await FilesetResolver.forVisionTasks(`${MP_URL}/wasm`);
+  const { mod: { HandLandmarker }, fileset } = await visionBase();
   const opts = (delegate) => ({
     baseOptions: { modelAssetPath: MODEL_URL, delegate },
     runningMode: 'VIDEO', numHands: 2,
@@ -461,6 +735,141 @@ async function loadModel() {
 function ensureModel() {
   if (!modelPromise) modelPromise = loadModel().catch((e) => { modelPromise = null; throw e; });
   return modelPromise;
+}
+
+// face tracker: only downloaded once you pick the spider effect
+function ensureFace() {
+  if (!facePromise) {
+    faceState = 'loading';
+    if (S.running) toast('loading the face tracker…');
+    facePromise = (async () => {
+      const { mod: { FaceLandmarker }, fileset } = await visionBase();
+      const opts = (delegate) => ({
+        baseOptions: { modelAssetPath: FACE_MODEL_URL, delegate },
+        runningMode: 'VIDEO', numFaces: MAX_FACES,
+        minFaceDetectionConfidence: 0.5, minFacePresenceConfidence: 0.5, minTrackingConfidence: 0.5,
+      });
+      try { faceLm = await FaceLandmarker.createFromOptions(fileset, opts('GPU')); }
+      catch { faceLm = await FaceLandmarker.createFromOptions(fileset, opts('CPU')); }
+      faceState = 'ready';
+      if (S.running && S.fx === SPIDER) toast('mask on: look into the portal');
+    })().catch((e) => {
+      console.warn(e); facePromise = null; faceState = 'error';
+      toast("couldn't load the face tracker. check your internet connection.");
+    });
+  }
+  return facePromise;
+}
+const faceWanted = (now) => S.fx === SPIDER || (wipe.prev === SPIDER && now - wipe.t0 < WIPE_MS);
+
+// landmarks -> smoothed screen points -> mask mesh
+function processFaces(res, ts) {
+  const list = res.faceLandmarks || [];
+  nFaces = list.length;
+  const used = new Set();
+  const mx = S.mirror;
+  for (const lm of list) {
+    const nx = (Lay.ox + (mx ? 1 - lm[1].x : lm[1].x) * Lay.dw) / W, ny = (Lay.oy + lm[1].y * Lay.dh) / H;
+    // same face as last frame = the slot whose nose was nearest
+    let slot = null, bd = 0.04;
+    for (const f of faces) {
+      if (used.has(f) || !f.nose || ts - f.seenAt > 0.5) continue;
+      const d = (f.nose.x - nx) ** 2 + (f.nose.y - ny) ** 2;
+      if (d < bd) { bd = d; slot = f; }
+    }
+    slot = slot || faces.find((f) => !used.has(f) && ts - f.seenAt > 0.5) || faces.find((f) => !used.has(f));
+    if (!slot) continue;
+    used.add(slot);
+    const raw = slot.raw;
+    for (let i = 0; i < FM.NF; i++) {
+      const p = lm[i];
+      raw[3 * i] = (Lay.ox + (mx ? 1 - p.x : p.x) * Lay.dw) / W;
+      raw[3 * i + 1] = (Lay.oy + p.y * Lay.dh) / H;
+      raw[3 * i + 2] = p.z;
+    }
+    smoothFace(slot, ts);
+    slot.nose = { x: nx, y: ny }; slot.seenAt = ts;
+    buildFaceMesh(slot);
+  }
+}
+
+// one-euro smoothing, but with ONE cutoff for the whole face (from how fast the face moves),
+// so every point lags equally and the mask never warps while you move
+function smoothFace(f, ts) {
+  const raw = f.raw, n = raw.length;
+  let cx = 0, cy = 0;
+  for (let i = 0; i < n; i += 3) { cx += raw[i]; cy += raw[i + 1]; }
+  cx /= FM.NF; cy /= FM.NF;
+  if (!f.init || ts - f.seenAt > 0.3) {
+    f.sm.set(raw); f.init = true; f.t = ts; f.cx = cx; f.cy = cy; f.v = 0; return;
+  }
+  const dt = Math.max(1e-3, ts - f.t); f.t = ts;
+  const v = Math.hypot(cx - f.cx, cy - f.cy) / dt; f.cx = cx; f.cy = cy;
+  f.v += OneEuro.a(1, dt) * (v - f.v);
+  const a = OneEuro.a(FACE_MIN_CUTOFF + FACE_BETA * f.v, dt);
+  const sm = f.sm;
+  for (let i = 0; i < n; i++) sm[i] += a * (raw[i] - sm[i]);
+}
+
+function buildFaceMesh(f) {
+  const { NF, NO, pos, hood, Ginv } = FM, sm = f.sm, g = f.geo;
+  for (let i = 0; i < NF; i++) {
+    g[3 * i] = sm[3 * i] * W; g[3 * i + 1] = sm[3 * i + 1] * H; g[3 * i + 2] = sm[3 * i + 2] * Lay.dw;
+  }
+  // best affine map canonical face (cm) -> screen (px): tells us how the head is turned
+  const Mx = [];
+  for (let c = 0; c < 3; c++) {
+    let s0 = 0, s1 = 0, s2 = 0, s3 = 0;
+    for (let i = 0; i < NF; i++) {
+      const b = g[3 * i + c];
+      s0 += pos[3 * i] * b; s1 += pos[3 * i + 1] * b; s2 += pos[3 * i + 2] * b; s3 += b;
+    }
+    Mx.push(Ginv.map((r) => r[0] * s0 + r[1] * s1 + r[2] * s2 + r[3] * s3));
+  }
+  // hood vertices: hang off the real face outline, shaped by the head's pose
+  for (let k = 0; k < 3; k++) for (let j = 0; j < NO; j++) {
+    const o = FACE_OVAL[j], h = (k * NO + j) * 3;
+    const d0 = hood[h] - pos[3 * o], d1 = hood[h + 1] - pos[3 * o + 1], d2 = hood[h + 2] - pos[3 * o + 2];
+    const v = (NF + k * NO + j) * 3;
+    for (let c = 0; c < 3; c++) g[v + c] = g[3 * o + c] + Mx[c][0] * d0 + Mx[c][1] * d1 + Mx[c][2] * d2;
+  }
+  const sc = (Math.hypot(Mx[0][0], Mx[0][1], Mx[0][2]) + Math.hypot(Mx[1][0], Mx[1][1], Mx[1][2])) / 2 || 1;
+  for (let r = 0; r < 3; r++) for (let c = 0; c < 3; c++) f.rot[c * 3 + r] = Mx[r][c] / sc;   // column-major
+  const dist = (a, b) => Math.hypot(g[3 * a] - g[3 * b], g[3 * a + 1] - g[3 * b + 1]);
+  const openness = (up, lo, c1, c2) => {
+    const k = Math.min(1, Math.max(0, (dist(up, lo) / (dist(c1, c2) || 1) - 0.07) / 0.15));
+    return 0.14 + 0.86 * k * k * (3 - 2 * k);
+  };
+  f.open = [openness(159, 145, 33, 133), openness(386, 374, 362, 263)];
+  f.ready = true;
+}
+
+function drawMasks(maskV, wipeU, dt, nowS) {
+  for (const f of faces) f.alpha += ((nowS - f.seenAt < 0.25 ? 1 : 0) - f.alpha) * Math.min(1, dt * 10);
+  if (!MP || maskV <= 0.001 || !faces.some((f) => f.ready && f.alpha > 0.01)) return;
+  gl.useProgram(MP.prog); gl.bindVertexArray(MP.vao);
+  const u = MP.u;
+  gl.uniform2f(u.uRes, W, H);
+  gl.uniform1f(u.uDepthScale, 1 / (2 * Math.max(W, H)));
+  gl.uniform2fv(u.uQ, maskArr);
+  gl.uniform1f(u.uMask, maskV);
+  gl.uniform1i(u.uFx, S.fx);
+  gl.uniform1i(u.uFxPrev, wipe.prev);
+  gl.uniform4fv(u.uWipe, wipeU);
+  gl.uniform1f(u.uDpr, dpr);
+  gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  for (const f of faces) {
+    if (!f.ready || f.alpha <= 0.01) continue;
+    gl.clear(gl.DEPTH_BUFFER_BIT);
+    gl.bindBuffer(gl.ARRAY_BUFFER, MP.posBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.geo);
+    gl.uniformMatrix3fv(u.uRot, false, f.rot);
+    gl.uniform2f(u.uEyeOpen, f.open[0], f.open[1]);
+    gl.uniform1f(u.uAlpha, f.alpha);
+    gl.drawElements(gl.TRIANGLES, FM.idx.length, gl.UNSIGNED_SHORT, 0);
+  }
+  gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
+  gl.bindVertexArray(null);
 }
 
 const filt = Array.from({ length: 8 }, () => new OneEuro(MIN_CUTOFF, BETA));
@@ -643,6 +1052,7 @@ function switchFx(i, pos) {
   wipe.x = pos ? pos.x : 0.5; wipe.y = pos ? pos.y : 0.5;
   S.fx = i;
   fxLabel = { text: `--fx=${FX[i]}`, t0: now };
+  if (i === SPIDER) ensureFace();
   syncBar();
 }
 function fireSnap(pos) {
@@ -761,6 +1171,11 @@ function drawHud() {
     `hand_landmarker: ${nHands} hand${nHands === 1 ? '' : 's'}  ${detMs.toFixed(1)} ms (${S.delegate})  |  quad area ${(hasQuad ? quadArea * 100 : 0).toFixed(1)}%  |  spread ${(hasQuad ? spread : 0).toFixed(2)}  |  expand ${expanded ? 'full' : 'off'} ${expandV.toFixed(2)}${S.lock ? ' (locked)' : ''}`,
     `quad = ${q}  one_euro(min_cutoff=${MIN_CUTOFF}, beta=${BETA})`,
   ];
+  if (S.fx === SPIDER) {
+    lines.push(faceState === 'ready'
+      ? `face_landmarker: ${nFaces} face${nFaces === 1 ? '' : 's'}  ${faceMs.toFixed(1)} ms  |  mask mesh ${FM.NV} verts, ${FM.idx.length / 3} tris  |  eyes ${faces[0].open.map((v) => v.toFixed(2)).join(' ')}`
+      : `face_landmarker: ${faceState}…`);
+  }
   const ready = performance.now() - snap.armedAt < 300 ? 'ready' : '-';
   lines.push(snap.mode === 'mic+cam'
     ? `snap: mic+cam  |  mic peak ${snap.level.toFixed(3)} / thr ${snap.thr.toFixed(3)}  |  pose ${ready}  |  snaps ${snap.count}`
@@ -782,7 +1197,7 @@ let presence = 0, expandV = 0, lastNow = performance.now(), lastVT = -1;
 let frames = 0, camFrames = 0, fpsAt = performance.now();
 const ease = (t) => t * t * (3 - 2 * t);
 const hintEl = $('#hint');
-const maskArr = new Float32Array(8);
+const maskArr = new Float32Array(8), wipeU = new Float32Array(4);
 
 function frame(now) {
   requestAnimationFrame(frame);
@@ -803,6 +1218,15 @@ function frame(now) {
         processHands(res, t0 / 1000);
       } catch (e) { console.warn(e); }
     }
+    // face mesh for the spider mask (phones: every other camera frame, hands come first)
+    if (faceLm && faceWanted(now) && (!MOBILE || camFrames % 2 === 0)) {
+      const t1 = performance.now();
+      try {
+        const res = faceLm.detectForVideo(video, t1);
+        faceMs = faceMs * 0.8 + (performance.now() - t1) * 0.2;
+        processFaces(res, t1 / 1000);
+      } catch (e) { console.warn(e); }
+    }
   }
 
   // fade the portal in/out, expand when stretched wide
@@ -821,6 +1245,7 @@ function frame(now) {
   const poly = maskPolygon(e);
   poly.forEach((p, i) => { maskArr[2 * i] = p.x; maskArr[2 * i + 1] = p.y; });
 
+  gl.useProgram(prog0); gl.bindVertexArray(vao0);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texV);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texA);
   gl.activeTexture(gl.TEXTURE0);
@@ -840,9 +1265,11 @@ function frame(now) {
   if (wp < 1) {
     const wx = wipe.x * W, wy = wipe.y * H;
     const maxR = Math.max(Math.hypot(wx, wy), Math.hypot(W - wx, wy), Math.hypot(wx, H - wy), Math.hypot(W - wx, H - wy));
-    gl.uniform4f(U.uWipe, wx, wy, maxR * (1 - Math.pow(1 - wp, 3)), 0.9 * (1 - wp));
-  } else gl.uniform4f(U.uWipe, 0, 0, -1, 0);
+    wipeU.set([wx, wy, maxR * (1 - Math.pow(1 - wp, 3)), 0.9 * (1 - wp)]);
+  } else wipeU.set([0, 0, -1, 0]);
+  gl.uniform4fv(U.uWipe, wipeU);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
+  drawMasks(Math.max(presence, e), wipeU, dt, now / 1000);
 
   drawOverlay(presence, now);
 
@@ -1010,6 +1437,7 @@ async function begin(mirror) {
   bar.classList.remove('hidden');
   S.running = true; tStart = performance.now(); lastQuadAt = performance.now();
   snap.mode = snap.mic ? 'mic+cam' : 'cam';
+  if (S.fx === SPIDER) ensureFace();
   syncBar(); wake();
 }
 
@@ -1082,6 +1510,9 @@ if (!gl) {
     setStatus(`graphics error: ${e.message}`, true);
   }
 }
+</script>
+<script id="facemesh" type="application/json">
+{"source":"MediaPipe canonical_face_model.obj (Apache-2.0): 468 vertices in cm, their UVs, 898 triangles","pos":"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","uv":"/n/zWAGA13P+f8tla3sshwmADHn6f3KA4H9TmSpKhp79fwaw/3/mugGAl+QBgHFVAYAeUgGAwk7+fwJO/n9IS/5/1kf+f1JD/X/4N/N/4G9JeRRt2xrwvq1dJZe5VkOWpU8tl1BGYZyzZKaYYVjup75eZ6e/URmnQ0x6pW8/1ZaaZUEotEfYnzcbnJm9NdCbFlsxd8R4f1lied9RlXC/VyRqXVVLc7NRxG07Uf5frkWZfM5zPHz8eP1Bfa+2ZnmLCG6Oc91rXHfiRst3vnsbgFNWlLfgS+20VythzpRyh7JzZGelwFqfTTsRGEVXcVttBHVLaslhJ05zZEhO7kZiuixs0G/LYvi3E2KBvthUWuHcOpvEUF2Vz8g6UbNcLKO4Dnl0VWNy21Q6bHxT/3GAa1pjWE4tZyBLVGdZTsV1X3FgbsFOwnPBTrJ5wU5Ad4c46niGQxx5OkgeeZ1LGHkCTo1tAk4tbeVLVGzESRZrqkfdY0VckgOhcPp/e2vHafpN3WhVTNR3AWY4bPxpjHb9Z0NfzoamVQGBY2n6c/89MdpwSm3MzFNUvkZmRkAVcQK9BW7pz4VpHuT5Sd6ZDDiIkKxp3ZnTQQGlfG3hj8Zyi3a2Ld2KTz/1iklJRog0VQ6KZl6DjSJmPZH2eR2YcjDgeZ06qqagfQZwmGfOg/wEM5kebV6UoWWCczdEfp9qcCV7RggLW0dr45x4dod+LT1iOL4yBiuIG5F1AS9+Qmkik6rBYuodsH2ta+Rhzn2lLDKanFGQmuZXcplmZS9KGTBVaVVuUg6pUQoaKURbIQGANs/+f6kLvV3mmalkvZoOaeKb6zFrqH9jQaOvXd6k5lcHpZxRQ6QpTQij4g5QrilN0Jz/f65hdGo0YBhyFW9Bdx1h+n8CpulJGC7VVa0lxXD7GNggQzWlaEigonRWjPd/TBccYGgTPR2OYttyAk6xcp1LdXLBSOBx6kQVbrI7I2h3UJZmpVF0ZIJSK14JVng/D2boc0OUt2/eo4lqm6HTacFOXzoBUeB3t6VPaRcy/3+5h6l6ro7+f3OPnm6kgfh/EiL6f6Mt4HRJLjRYK0EAYQ1t0V9GONdR5G1uW05ll0vgYJ9yNSM2acR9X1CFOaha/C8VU8dLaDCMWp9HDElCIjpRNlbyWgxukYiddI1z5m/scKB3Vngqai6qhmBerRdYCq4YUHutlUizqsI9AZ5dGv+HgkRPk0JMG5FcVe2Qzl3pkmFlU5WNa/uW8AHrhNVuNG5pdVqFNXlKdOB5qG/td+dxGm/qasd74G+EexJsK202nGJwf5o3c32ZKkq6odRG+aKShC6H1bWGnraGFG0k5fC+UqIll0apQ5ZasC2Xr7lhnEubppiep+6nQaFnp0CuGae8s3qlkMDVlliaOihLuNifyOScmULK0JvcpCt3O4d/WZ6G31Fqj79X25VdVbSMs1E7kjtR9p+bRVeD5XPdgwZ5A758rz+ZhosBkpBzIZRkdxy5y3c1hBeAramStyC067So1GHOaY2KsoybZ6U6paRNxO4YRaiOW237iktqNp4nToqbSE4SuWC60ZPUbzSd9rftnX6+I6tM4STFmsSyoo3POMVQs6PTo7jxhnRVnI3bVMWTfFMAjoBrpZxYTtKYIEurmFlOOopfcZ+RwU49jMFOTYbBTrqIijgVh4ZD44Y6SOGGnUvnhgJOcpICTtKS5Uurk8RJ6ZSqRyWcLlxt/KFwOJb6TSKXVUwriAFmx5MAanOJ/WemoNKGY6oJgZ6WAHQAwjHakbVpzDSsUL60mUFA6o4Cvf+R58+RlhXkBrbemfPHiZBVlt+ZLL4BpXiS9Y9HjaN2SdLdirDA9oq4tkmIx6oRio+hh43RmUmRAoYomIzP4HlixaqmVoLxb2WY1YMD+zOZ0JJ6lF2aiXPIu36fhI8he7n3C1u7lOKcqImffs7CYjhBzQYrduSQdfzQfkKX3ZOqM53jHUqCqmsxnt99WtMxmmOukJoZqHKZmZovSuTPVWlpkTEOVq4KGta7WyFCouaZVpu9mvOW45sVzmuogJxBo1Ci3qQZqAelY65DpNayCKMd8VCu1rLQnIyVOmDnjRVvvogdYRK2Fi4lqqolIY/tGCffQzVbl0igWYtkjOOfaBPB4o1iJI0CTk6NnUuKjcFIH47qROeRozvcl3dQaZmlUYubglLGoSVWhMAQZhaMYJREkOKjdpWboSyWwU6bxQFRFojDpZ+WEDJShbSOZ5GrgRSLRS7CpyZB+p4NbSSgPTghruVtjKRKZWS042BQjS0jzZbJfZmvgjlOpfcv46zIS5TPi1pZuAtJu906Ucap+1rwkZ6IaIudcxCQ83AwiEh41JUxqnmfXq3opwmu5696rWu3s6o9wgGeouX+h327UJO9sxyRoarukC2i65KXmlqVZJQNlxD+64QzkTpulopmhcyGMXQfhqhvEojnceeQ7GoshNtveYQQbNeSNZyJj8uavIypmdW1uqErufmi","tri":"rQCbAIUA9gAhAAcAfgGOAWoBBwHSAfkANAGfAUQBTgBfAL8AZAGFAQgBfwAiAKIAcAEIAYUBiwCiACIACwEAAC4BJQBIAAAACwAuAQAACwAAAEgAXQHDAV4BeAB5AOcAxAFeAcMB6ADnAHkACwEuAQ0BJQAnAEgALwENAS4BSQBIACcAZQFXAV4BgAB5AHIAFQFeAVcBLwByAHkAXgHEAWUBeQCAAOgAxQFlAcQB6QDoAIAAKwFNASkBRQBDAGgATAEpAU0BZwBoAEMArwCYAIwBrwCrAJgAeQGMAZgAlACYAKsAfQGAAX4BmgCbAJ0AjgF+AYABrQCdAJsAGAFbAUoBMgBlAHYAXAFKAVsBdwB2AGUADQEvAQ4BJwAoAEkAMAEOAS8BSgBJACgACQBQAZcACQCXAGsAUQGXAFABbABrAJcAWAEWAWgBcwCDADAAFwFoARYBMQAwAIMABgGvAaIBIADCANMAqAGiAa8BzADTAMIAMAGYAQ4BSgAoALgAmQEOAZgBuQC4ACgAEAE2AZcBKgC3AFAAnwGXATYBvwBQALcAQgEOAZoBXAC6ACgAmQGaAQ4BuQAoALoAWwHBAVwBdgB3AOUAwgFcAcEB5gDlAHcAsgGwAa4B1gDSANQApgGuAbABygDUANIAOQE6ARIAUwASAFQAEQASADoBEQBUABIAMwF3ATIBTQBMAJIAIwEyAXcBPQCSAEwAAwGDAQQBHQAeAKAAhAEEAYMBoQCgAB4AHgGeAYABOACdAL4AjgGAAZ4BrQC+AJ0AogGoAZYBwgC2AMwATwGWAagBagDMALYAbwGgAWwBigCHAMAAsgFsAaAB1gDAAIcAhwGnAUcBpQBiAMsAZgFHAacBgQDLAGIAKgEtARwBRAA2AEcA+wAcAS0BFQBHADYABAATAQUABAAFAC0AGQEFABMBMwAtAAUA/gB1Af0AGAAXAJAAdgH9AHUBkQCQABcAQAFBATMBWgBNAFsAdwEzAUEBkgBbAE0AGAGpAZsBMgC7AM0AqwGbAakBzwDNALsApQE5AcgAyQDIAFMAEgDIADkBEgBTAMgATwFBAZYBagC2AFsAlQGWAUEBtQBbALYAlQFBAZQBtQC0AFsAQAGUAUEBWgBbALQAEQA6ARAAEQAQAFQAOwEQADoBVQBUABAAqQEKAaoBzQDOACQApwGqAQoBywAkAM4AcQGMAZABjACwAKsAeQGQAYwBlACrALAAhwENAUIBpQBcACcADgFCAQ0BKAAnAFwAoQHRAZ0BwQC9APUA0AGdAdEB9AD1AL0AAQECAYIBGwCfABwAgQGCAQIBngAcAJ8ABAGEAdMBHgD3AKEA0gHTAYQB9gChAPcA+ADIAaMBAwDEAOwAjwGjAcgBrgDsAMQATQEqAUwBaABnAEQAHAFMASoBNgBEAGcAHQEIAKEBNwDBAAgAqAChAQgAqAAIAMEAVAEFAVoBbwB1AB8AwAFaAQUB5AAfAHUAHQGhAbkBNwDdAMEAnQG5AaEBvQDBAN0ARwHMAUYBYgBhAPAASAFGAcwBYwDwAGEAFQFjAUkBLwBkAH4AcwFJAWMBjgB+AGQANQGIAbYBTwDaAKYAtwG2AYgB2wCmANoAfQF+AQABmgAaAJsAVQEAAX4BcACbABoAaAEXAaQBgwDGADEArQGkARcB0QAxAMYAbQFsAXsBiACWAIcAigF7AWwBqQCHAJYAYwEVAbUBfgDZAC8AVwG1ARUBcgAvANkAuwG8ARoB3wA0AOAAGwEaAbwBNQDgADQAGQETAWsBMwCGAC0AuAFrARMB3AAtAIYArwEGAYsB0wCqACAAcQGLAQYBjAAgAKoAUQErAVIBbABtAEUAKQFSASsBQwBFAG0ATwERAUEBagBbACsAdwFBAREBkgArAFsAXAHCAV0BdwB4AOYAwwFdAcIB5wDmAHgA0wFnAVYB9wBxAIIAvgFWAWcB4gCCAHEAGgEbAU4BNABpADUAJQFOARsBPwA1AGkA+gDKAc4BFADyAO4AzQHOAcoB8QDuAPIAFAFhASwBLgBGAHwAfwEsAWEBnAB8AEYARQEkAUQBYABfAD4ANAFEASQBTgA+AF8AGwEUASUBNQA/AC4ALAElARQBRgAuAD8AvwEIAVkB4wB0ACIAdAFZAQgBjwAiAHQAYAFZAVoBewB1AHQAVAFaAVkBbwB0AHUAAQATABIBAQAsABMAYgESARMAfQATACwA+AAZAcgBAwDsADMAawHIARkBhgAzAOwAqQGqAasBzQDPAM4AtAGrAaoB2ADOAM8AfAF9AfwAmQAWAJoAAAH8AH0BGgCaABYAhwGJAQ0BpQAnAKcACwENAYkBJQCnACcAxwCsAcgAxwDIANAApQHIAKwByQDQAMgASgFJAQoBZQAkAGQAcwEKAUkBjgBkACQApgGwAREBygArANQAHwERAbABOQDUACsAIgH6AEgBPABjABQAzgFIAfoA8gAUAGMAAgEeAYEBHACeADgAgAGBAR4BnQA4AJ4AVgG+AWEBcQB8AOIACQFhAb4BIwDiAHwAAQGCAQMBGwAdAJ8AgwEDAYIBoACfAB0ArgGmAa8B0gDTAMoAqAGvAaYBzADKANMAvQFWARQB4QAuAHEAYQEUAVYBfABxAC4AqAGmAU8BzABqAMoAEQFPAaYBKwDKAGoAMgEkATMBTABNAD4ARQEzASQBYAA+AE0AbgG/AWABiQB7AOMAWQFgAb8BdADjAHsALgEMAS8BSABJACYADwEvAQwBKQAmAEkAcwFmAQoBjgAkAIEApwEKAWYBywCBACQARwEmAcwBYgDwAEAAxwHMASYB6wBAAPAAJgFLARYBQAAwAGYAFwEWAUsBMQBmADAALwEPATABSQBKACkAEAEwAQ8BKgApAEoAqwG0AbIBzwDWANgAsAGyAbQB1ADYANYAMAEQAZgBSgC4ACoAlwGYARABtwAqALgAigGuAYsBqQCqANIArwGLAa4B0wDSAKoAiwFxAXoBqgCVAIwAkAF6AXEBsACMAJUAKAFOASsBQgBFAGkATQErAU4BaABpAEUAoQGoAF8BwQB6AKgABgBfAagABgCoAHoAGAGbAWABMgB7ALsAeAFgAZsBkwC7AHsAPwFAAUUBWQBgAFoAMwFFAUABTQBaAGAAHQEnAVABNwBrAEEAKAFQAScBQgBBAGsAlAFAAZMBtACzAFoAPwGTAUABWQBaALMASgFcAUkBZQBkAHcAXQFJAVwBeAB3AGQATgElAU0BaQBoAD8AKgFNASUBRAA/AGgAQwHGAW4BXQCJAOoAvwFuAcYB4wDqAIkAEAA7AQ8AEAAPAFUAPAEPADsBVgBVAA8ArQEXAWYB0QCBADEASwFmARcBZgAxAIEADwA8AQ4ADwAOAFYAPQEOADwBVwBWAA4ACAAdAQkACAAJADcAUAEJAB0BawA3AAkASQFdARUBZAAvAHgAXgEVAV0BeQB4AC8A/AD9AHwBFgCZABcAdgF8Af0AkQAXAJkAkgGTAT4BsgBYALMAPwE+AZMBWQCzAFgAXwEGAKMBegDEAAYAxQCjAQYAxQAGAMQARAE+AUUBXwBgAFgAPwFFAT4BWQBYAGAAjQFvAW0BrACIAIoAbAFtAW8BhwCKAIgAIAGzAY0BOgCsANcAbwGNAbMBigDXAKwAtgG3AVgB2gBzANsAFgFYAbcBMADbAHMADwE3ARABKQAqAFEANgEQATcBUABRACoABQAZAcMABQDDADMA+ADDABkBAwAzAMMAEQEfAXcBKwCSADkAIwF3AR8BPQA5AJIAjAGsAa8AqwCvANAAxwCvAKwBxwDQAK8ADAE4AQ8BJgApAFIANwEPATgBUQBSACkAvAG9ARsB4AA1AOEAFAEbAb0BLgDhADUA/gBTAXUBGACQAG4AhgF1AVMBowBuAJAAJwEaASgBQQBCADQATgEoARoBaQA0AEIAWgHAAVsBdQB2AOQAwQFbAcAB5QDkAHYAxgFkAb8B6gDjAH8ACAG/AWQBIgB/AOMAUAEoAVEBawBsAEIAKwFRASgBRQBCAGwAlwBRAQoAlwAKAGwAUgEKAFEBbQBsAAoAFgG3ASYBMABAANsAxwEmAbcB6wDbAEAAlwGfASQBtwA+AL8ANAEkAZ8BTgC/AD4AZgFzAa0BgQDRAI4AYwGtAXMBfgCOANEAWQF0AVQBdABvAI8ACQFUAXQBIwCPAG8AhAGGAdIBoQD2AKMA+QDSAYYBBwCjAPYAYAFaARgBewAyAHUAWwEYAVoBdgB1ADIAJwG6ARoBQQA0AN4AuwEaAboB3wDeADQAEwBeAGIBEwB9AF4AcgFiAV4AjQBeAH0AJwEdAboBQQDeADcAuQG6AR0B3QA3AN4AowHFAPgAxAADAMUAwwD4AMUAwwDFAAMAZwEHAf8AggAZACEA+QD/AAcBBwAhABkAEwESAbgBLQDcACwAyQG4ARIB7QAsANwALAF/AS0BRgBHAJwAcAEtAX8BiwCcAEcAoQFfAdEBwQD1AHoAnAHRAV8BvAB6APUA0gEHAdMB9gD3ACEAZwHTAQcBggAhAPcAhQH7AHABogCLABUALQFwAfsARwAVAIsAdgGCAXwBkQCZAJ8AgQF8AYIBngCfAJkAewGKAXoBlgCVAKkAiwF6AYoBqgCpAJUAXwGjAZwBegC8AMQAjwGcAaMBrgDEALwAqgFCAbQBzgDYAFwAmgG0AUIBugBcANgAgwF1AYQBoAChAJAAhgGEAXUBowCQAKEAiQFGAaQApwCkAGEAAgCkAEYBAgBhAKQAYgFyAc0BfQDxAI0AzgHNAXIB8gCNAPEAAAALAaQAAACkACUAiQGkAAsBpwAlAKQACwAMAC4BCwBIAAwADAEuAQwAJgAMAEgAggF2AYMBnwCgAJEAdQGDAXYBkACRAKAADAANAAwBDAAmAA0AOAEMAQ0AUgANACYAJQEsASoBPwBEAEYALQEqASwBRwBGAEQAVAEJAQUBbwAfACMAvgEFAQkB4gAjAB8AfAGBAX0BmQCaAJ4AgAF9AYEBnQCeAJoAGAFKAakBMgDNAGUACgGpAUoBJABlAM0ApwGHAaoBywDOAKUAQgGqAYcBXAClAM4ArQFjAaQB0QDGAH4AtQGkAWMB2QB+AMYAhwFHAYkBpQCnAGIARgGJAUcBYQBiAKcAyQG2AbgB7QDcANoAWAG4AbYBcwDaANwAfgFqAVUBmwBwAIUAzwFVAWoB8wCFAHAAyQHNAcsB7QDvAPEAygHLAc0B7gDxAO8AsgGuAWwB1gCHANIAigFsAa4BqQDSAIcAngHPAY4BvgCtAPMAagGOAc8BhQDzAK0ABgGsAXEBIACMANAAjAFxAawBqwDQAIwAyQESAc0B7QDxACwAYgHNARIBfQAsAPEAPAGTAT0BVgBXALMAkgE9AZMBsgCzAFcAOwGUATwBVQBWALQAkwE8AZQBswC0AFYAOgGVATsBVABVALUAlAE7AZUBtAC1AFUAOQGWAToBUwBUALYAlQE6AZYBtQC2AFQAogGWAaUBwgDJALYAOQGlAZYBUwC2AMkAbgGRAUMBiQBdALEAaQFDAZEBhACxAF0AmAGXATIBuABMALcAJAEyAZcBPgC3AEwAmAEyAZkBuAC5AEwAIwGZATIBPQBMALkAmgGZAR8BugA5ALkAIwEfAZkBPQC5ADkAtAGaAbAB2ADUALoAHwGwAZoBOQC6ANQAsgGgAasB1gDPAMAAmwGrAaABuwDAAM8ACAFwAXQBIgCPAIsAfwF0AXABnACLAI8AyQHLAbYB7QDaAO8ANQG2AcsBTwDvANoAYAF4AW4BewCJAJMAkQFuAXgBsQCTAIkABAABABMBBAAtAAEAEgETAQEALAABAC0ArAEGAaUB0ADJACAAogGlAQYBwgAgAMkARwFmASYBYgBAAIEASwEmAWYBZgCBAEAAbwGzAaABigDAANcAsQGgAbMB1QDXAMAAxwG3ASEB6wA7ANsAiAEhAbcBpgDbADsASAHOAUYBYwBhAPIAcgFGAc4BjQDyAGEARgFyAQIAYQACAI0AXgACAHIBXgCNAAIAzAHHATEB8ABLAOsAIQExAccBOwDrAEsAwAFTAcEB5ADlAG4A/gDBAVMBGABuAOUABQG+Af8AHwAZAOIAZwH/AL4BggDiABkAwQH+AMIB5QDmABgA/QDCAf4AFwAYAOYAwgH9AMMB5gDnABcA/ADDAf0AFgAXAOcAwwH8AMQB5wDoABYAAAHEAfwAGgAWAOgAAAFVAcQBGgDoAHAAxQHEAVUB6QBwAOgAnQHQAZ4BvQC+APQAzwGeAdAB8wD0AL4AuQGdAR4B3QA4AL0AngEeAZ0BvgC9ADgAuQEeAboB3QDeADgAAgG6AR4BHAA4AN4AugECAbsB3gDfABwAAQG7AQIBGwAcAN8AvAG7AQMB4AAdAN8AAQEDAbsBGwDfAB0AAwEEAbwBHQDgAB4AvQG8AQQB4QAeAOAABAHTAb0BHgDhAPcAVgG9AdMBcQD3AOEA+gA1AcoBFADuAE8AywHKATUB7wBPAO4AIgExAYgBPACmAEsAIQGIATEBOwBLAKYAzAExAUgB8ABjAEsAIgFIATEBPABLAGMAeAGxAZEBkwCxANUAswGRAbEB1wDVALEA+gAiATUBFABPADwAiAE1ASIBpgA8AE8AmwGgAXgBuwCTAMAAsQF4AaAB1QDAAJMAVQHPAcUBcADpAPMA0AHFAc8B9ADzAOkAxQHQAWUB6QCAAPQA0QFlAdAB9QD0AIAAnAFXAdEBvAD1AHIAZQHRAVcBgAByAPUAtQFXAY8B2QCuAHIAnAGPAVcBvAByAK4AawG4AWgBhgCDANwAWAFoAbgBcwDcAIMAyAGkAY8B7ACuAMYAtQGPAaQB2QDGAK4AyAFrAaQB7ADGAIYAaAGkAWsBgwCGAMYAaQGRASABhAA6ALEAswEgAZEB1wCxADoAYQEJAX8BfACcACMAdAF/AQkBjwAjAJwA/wD5AFMBGQBuAAcAhgFTAfkAowAHAG4ABQH/AMABHwDkABkAUwHAAf8AbgAZAOQADgA9AQ0ADgANAFcAOAENAD0BUgBXAA0APQGSATgBVwBSALIANwE4AZIBUQCyAFIAkgE+ATcBsgBRAFgANgE3AT4BUABYAFEAPgFEATYBWABQAF8AnwE2AUQBvwBfAFAA"}
 </script>
 </body>
 </html>

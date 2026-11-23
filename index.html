@@ -231,6 +231,8 @@ uniform float uGlyphs;
 uniform float uDpr;
 uniform int uFxPrev;
 uniform vec4 uWipe;     // snap ripple: x, y, radius (px, <0 = off), ring strength
+uniform sampler2D uMaskTex;
+uniform float uMaskOn;
 out vec4 outColor;
 
 vec2 toUV(vec2 p) {
@@ -330,7 +332,18 @@ vec3 fxPixel(vec2 p) {
   return c * (1.0 - 0.25 * grid);
 }
 
-// comic-book multiverse: purple/blue print, misregistered plates, halftone, hatching, ink
+// the face-tracked mask (premultiplied, drawn into its own texture first)
+vec4 maskAt(vec2 p) { return uMaskOn > 0.5 ? texture(uMaskTex, vec2(p.x / uRes.x, 1.0 - p.y / uRes.y)) : vec4(0.0); }
+vec3 scene(vec2 p) { vec4 m = maskAt(p); return vid(p) * (1.0 - m.a) + m.rgb; }
+float sobelScene(vec2 p, float s) {
+  float tl = luma(scene(p + vec2(-s, -s))), t = luma(scene(p + vec2(0.0, -s))), tr = luma(scene(p + vec2(s, -s)));
+  float l  = luma(scene(p + vec2(-s, 0.0))),                                   r  = luma(scene(p + vec2(s, 0.0)));
+  float bl = luma(scene(p + vec2(-s, s))),  b = luma(scene(p + vec2(0.0, s))),  br = luma(scene(p + vec2(s, s)));
+  return length(vec2(-tl - 2.0 * l - bl + tr + 2.0 * r + br, -tl - 2.0 * t - tr + bl + 2.0 * b + br));
+}
+
+// comic-book multiverse: purple/blue print, misregistered plates, halftone, hatching, ink.
+// the mask keeps its own black / red / white, but gets printed the same way so it sits in the frame
 vec3 fxSpider(vec2 p) {
   // every so often a strip of the image tears sideways
   float band = floor(p.y / (22.0 * uDpr));
@@ -346,20 +359,27 @@ vec3 fxSpider(vec2 p) {
   vec3 c3 = vec3(0.40, 0.80, 1.0), c4 = vec3(1.0, 0.88, 0.97);
   vec3 col = t < 0.25 ? mix(c0, c1, t * 4.0) : t < 0.5 ? mix(c1, c2, (t - 0.25) * 4.0)
            : t < 0.75 ? mix(c2, c3, (t - 0.5) * 4.0) : mix(c3, c4, (t - 0.75) * 4.0);
+  vec4 m = maskAt(p);
+  if (m.a > 0.002) {
+    vec3 mc = m.rgb / m.a;
+    mc = floor(mc * 9.0 + 0.5) / 9.0;          // printed in a few flat tones
+    col = mix(col, mc, m.a);
+  }
+  float ls = luma(scene(p));
   // pink + cyan print plates slightly out of register
   float o = (3.0 + 7.0 * tear) * uDpr;
-  float lr = luma(vid(p + vec2(o, o * 0.4))), lb = luma(vid(p - vec2(o, o * 0.4)));
-  col += vec3(0.95, 0.1, 0.55) * max(lr - l, 0.0) * 1.6 + vec3(0.1, 0.8, 1.0) * max(lb - l, 0.0) * 1.6;
+  float lr = luma(scene(p + vec2(o, o * 0.4))), lb = luma(scene(p - vec2(o, o * 0.4)));
+  col += vec3(0.95, 0.1, 0.55) * max(lr - ls, 0.0) * 1.4 + vec3(0.1, 0.8, 1.0) * max(lb - ls, 0.0) * 1.4;
   // halftone dots
   vec2 q = mat2(0.7071, -0.7071, 0.7071, 0.7071) * p / (5.0 * uDpr);
   float d = length(fract(q) - 0.5);
-  float r = 0.5 * sqrt(clamp(1.0 - l * 1.2, 0.0, 1.0));
-  col = mix(col, col * 0.55, 1.0 - smoothstep(r - 0.07, r + 0.07, d));
-  // hatching in the shadows
+  float r = 0.5 * sqrt(clamp(1.0 - ls * 1.2, 0.0, 1.0));
+  col = mix(col, col * mix(0.55, 0.7, m.a), 1.0 - smoothstep(r - 0.07, r + 0.07, d));
+  // hatching in the background's shadows
   float hatch = step(0.6, fract((p.x - p.y) / (6.0 * uDpr)));
-  col = mix(col, c0 * 0.6, hatch * smoothstep(0.22, 0.1, l) * 0.8);
-  // ink outlines
-  float e = sobel(p, 1.5 * uDpr);
+  col = mix(col, c0 * 0.6, hatch * smoothstep(0.22, 0.1, l) * 0.8 * (1.0 - m.a));
+  // ink outlines (around the mask too)
+  float e = sobelScene(p, 1.5 * uDpr);
   col = mix(col, vec3(0.02, 0.0, 0.05), smoothstep(0.22, 0.45, e));
   return col;
 }
@@ -415,83 +435,98 @@ const MESH_VS = `#version 300 es
 layout(location = 0) in vec3 aPos;    // screen px (top-left origin), depth px
 layout(location = 1) in vec2 aUV;
 layout(location = 2) in vec3 aNrm;    // normal in the canonical face model
-layout(location = 3) in float aEdge;  // 0 = face ... 1 = outer rim of the hood
+layout(location = 3) in float aEdge;  // 0 = face ... 1 = back of the hood
+layout(location = 4) in float aNeck;  // 1 = the part of the hood that runs down your neck
 uniform vec2 uRes;
 uniform mat3 uRot;                    // canonical face -> screen
 uniform float uDepthScale;
-out vec2 vUV; out vec3 vN; out float vEdge;
+out vec2 vUV; out vec3 vN; out float vEdge; out float vNeck;
 void main() {
-  vUV = aUV; vEdge = aEdge; vN = uRot * aNrm;
+  vUV = aUV; vEdge = aEdge; vNeck = aNeck; vN = uRot * aNrm;
   gl_Position = vec4(aPos.x / uRes.x * 2.0 - 1.0, 1.0 - aPos.y / uRes.y * 2.0, clamp(aPos.z * uDepthScale, -0.999, 0.999), 1.0);
 }`;
 
+// the mask itself: black spandex, red web seams, white lenses in thick black frames.
+// lit by the light measured on your real face, cut to your real head outline, and your hands stay in front
 const MESH_FS = `#version 300 es
 precision highp float;
 uniform vec2 uRes;
-uniform vec2 uQ[4];
-uniform float uMask;
-uniform int uFx;
-uniform int uFxPrev;
-uniform vec4 uWipe;
-uniform float uDpr;
-uniform vec2 uEyeOpen;     // lens squint, (left-of-UV eye, right-of-UV eye)
+uniform vec4 uVid;
+uniform float uMirror;
+uniform sampler2D uSeg;      // segmentation in video space: r = hair / accessories, g = body skin, b = clothes, a = face skin
+uniform float uSegOn;
+uniform vec2 uHand[42];      // hand landmarks (px), 21 per hand
+uniform vec2 uHandR;         // finger thickness per hand (px)
+uniform int uNHands;
+uniform vec2 uEyeOpen;       // lens squint, (left-of-UV eye, right-of-UV eye)
 uniform float uAlpha;
-in vec2 vUV; in vec3 vN; in float vEdge;
+uniform vec4 uLight;         // fitted on your face: xyz = gradient over the normal, w = ambient (linear)
+uniform float uTime;
+in vec2 vUV; in vec3 vN; in float vEdge; in float vNeck;
 out vec4 outColor;
 
 const vec2 WEB_C = vec2(0.5, 0.585);   // web centre: bridge of the nose
+const int BONES[46] = int[46](0,1, 1,2, 2,3, 3,4, 0,5, 5,6, 6,7, 7,8, 9,10, 10,11, 11,12,
+                              13,14, 14,15, 15,16, 17,18, 18,19, 19,20, 5,9, 9,13, 13,17, 0,17, 0,9, 0,13);
 
+float hash12(vec2 p) { vec3 p3 = fract(vec3(p.xyx) * 0.1031); p3 += dot(p3, p3.yzx + 33.33); return fract((p3.x + p3.y) * p3.z); }
 float sdSeg(vec2 p, vec2 a, vec2 b) {
   vec2 pa = p - a, ba = b - a;
   float h = clamp(dot(pa, ba) / max(dot(ba, ba), 1e-4), 0.0, 1.0);
   return length(pa - ba * h);
 }
-float portalSD(vec2 p) {
-  bool inside = false; float d = 1e9;
-  for (int i = 0; i < 4; i++) {
-    vec2 a = uQ[i], b = uQ[(i + 1) % 4];
-    if ((a.y > p.y) != (b.y > p.y) && p.x < (b.x - a.x) * (p.y - a.y) / (b.y - a.y) + a.x) inside = !inside;
-    d = min(d, sdSeg(p, a, b));
+// 1 where one of your hands is
+float handCover(vec2 p) {
+  float c = 0.0;
+  for (int h = 0; h < 2; h++) {
+    if (h >= uNHands) break;
+    float d = 1e9;
+    for (int b = 0; b < 23; b++) d = min(d, sdSeg(p, uHand[h * 21 + BONES[2 * b]], uHand[h * 21 + BONES[2 * b + 1]]));
+    float r = h == 0 ? uHandR.x : uHandR.y;
+    c = max(c, 1.0 - smoothstep(r, r * 1.8, d));
   }
-  return inside ? d : -d;
+  return c;
 }
 
-// lens shape: big teardrop, pointed toward the nose, outer end tilted up
-// q = offset from lens centre in UV units, x pointing away from the nose. returns (field, local y)
+// lens: big teardrop, sharp toward the nose, outer end tilted up. q = offset from the lens centre
+// (UV units, x pointing away from the nose). returns (field: <0 inside, local height -1..1)
 vec2 lens(vec2 q, float open) {
-  const float ang = 0.42;
+  const float ang = 0.40;
   vec2 r = vec2(cos(ang) * q.x + sin(ang) * q.y, -sin(ang) * q.x + cos(ang) * q.y);
-  float a = 0.126;
-  float b0 = 0.08 * mix(0.42, 1.0, smoothstep(-1.0, 0.4, clamp(r.x / a, -1.0, 1.0)));
+  float a = 0.138;
+  float t = clamp(r.x / a, -1.0, 1.0);
+  float b0 = 0.09 * mix(0.36, 1.0, smoothstep(-1.0, 0.35, t));
+  b0 *= 1.0 - 0.14 * smoothstep(0.0, 1.0, t) * step(0.0, r.y);     // flatter brow line on top
   float b = b0 * open;
-  r.y += b0 * (1.0 - open) * 0.55;     // squinting: the top comes down, the bottom stays
+  r.y += b0 * (1.0 - open) * 0.55;                                    // squint: the top comes down
   return vec2(length(vec2(r.x / a, r.y / b)) - 1.0, r.y / b);
 }
 
 void main() {
   vec2 p = vec2(gl_FragCoord.x, uRes.y - gl_FragCoord.y);
-  float m = smoothstep(-1.0, 1.0, portalSD(p)) * uMask;
-  int id = uFx;
-  if (uWipe.z >= 0.0 && length(p - uWipe.xy) > uWipe.z) id = uFxPrev;
-  if (m <= 0.0 || id != ${SPIDER}) discard;
-
-  float uvpp = 0.5 * (length(dFdx(vUV)) + length(dFdy(vUV)));   // UV units per pixel
   vec3 N = normalize(vN);
   float facing = clamp(-N.z, 0.0, 1.0);
 
-  // cel-shaded dark suit fabric
-  vec3 L = normalize(vec3(-0.45, -0.6, -0.66));
-  float lam = clamp(dot(N, L), 0.0, 1.0);
-  vec3 cSh = vec3(0.02, 0.022, 0.06), cMid = vec3(0.065, 0.08, 0.21), cLit = vec3(0.14, 0.18, 0.43);
-  vec3 col = mix(mix(cSh, cMid, smoothstep(0.24, 0.30, lam)), cLit, smoothstep(0.66, 0.72, lam));
-  vec2 hq = mat2(0.7071, -0.7071, 0.7071, 0.7071) * p / (4.0 * uDpr);
-  float hr = 0.5 * clamp(0.85 - lam, 0.0, 1.0);
-  col = mix(col, cSh * 0.7, (1.0 - smoothstep(hr - 0.08, hr + 0.08, length(fract(hq) - 0.5))) * 0.75);
-  vec3 Hv = normalize(L + vec3(0.0, 0.0, -1.0));
-  col += vec3(0.45, 0.6, 1.0) * smoothstep(0.945, 0.96, dot(N, Hv)) * 0.35;  // comic glint
-  col += vec3(0.62, 0.15, 0.9) * pow(1.0 - facing, 2.5) * 0.5;              // magenta rim light
+  // what is really in front of the camera at this pixel?
+  float vis;
+  if (uSegOn > 0.5) {
+    vec2 vu = (p - uVid.xy) / uVid.zw;
+    if (uMirror > 0.5) vu.x = 1.0 - vu.x;
+    vec4 sg = texture(uSeg, vu);
+    float hand = sg.g > 0.2 ? handCover(p) : 0.0;
+    float skin = max(sg.a, sg.g * (1.0 - hand));
+    if (vEdge < 0.002) vis = 1.0 - max(smoothstep(0.45, 0.8, sg.b), smoothstep(0.2, 0.5, sg.g) * hand);   // face: hands / hoodie in front
+    else vis = smoothstep(0.25, 0.6, mix(max(sg.r, skin), skin, vNeck));   // hood: your head (hair too), but down the neck only skin
+  } else {
+    vis = 1.0 - smoothstep(0.8, 1.0, vEdge);
+    vis *= mix(1.0, smoothstep(0.0, 0.25, facing), smoothstep(0.45, 0.7, vEdge));
+  }
+  float alpha = vis * uAlpha;
+  if (alpha <= 0.003) discard;
 
-  // web: spokes + sagging threads, thinner toward the centre
+  float uvpp = 0.5 * (length(dFdx(vUV)) + length(dFdy(vUV)));   // UV units per pixel
+
+  // web seams: spokes from the nose bridge + sagging threads
   vec2 q = vUV - WEB_C;
   float r = length(q);
   const float NS = 16.0, SA = 6.2831853 / NS;
@@ -500,30 +535,50 @@ void main() {
   float ft = fract(a);
   float chord = cos(0.5 * SA) / cos((ft - 0.5) * SA);
   float rr = r / (chord * (1.0 - 0.09 * sin(3.14159 * ft)));
-  const float G = 1.38, R0 = 0.05;
+  const float G = 1.36, R0 = 0.05;
   float lr = log(max(rr, 1e-4) / R0) / log(G);
   float dRing = lr < -0.5 ? 1.0 : abs(fract(lr + 0.5) - 0.5) * log(G) * rr;
-  float w = 0.0028;
-  float web = (1.0 - smoothstep(w - uvpp, w + uvpp, min(dSpoke, dRing))) * smoothstep(0.012, 0.03, r);
-  col = mix(col, vec3(0.004, 0.005, 0.016), web * 0.92);
+  float dWeb = min(dSpoke, dRing);
+  float w = 0.0022;
+  float fadeC = smoothstep(0.012, 0.03, r);
+  float web = (1.0 - smoothstep(w - uvpp, w + uvpp, dWeb)) * fadeC;
+  float seam = (1.0 - smoothstep(w, w * 2.8 + uvpp, dWeb)) * fadeC;     // shadow either side of the raised seam
 
-  // lenses (mirror the design, each side squints on its own)
+  // fabric
+  float weave = hash12(floor(vUV * 620.0));
+  vec3 alb = vec3(0.011, 0.012, 0.019) * (0.85 + 0.3 * weave);
+  alb *= 1.0 - 0.45 * seam;
+  alb = mix(alb, vec3(0.38, 0.018, 0.028), web);
+
+  // lenses (each side squints on its own)
   float side = vUV.x < 0.5 ? uEyeOpen.x : uEyeOpen.y;
-  vec2 lq = vec2(abs(vUV.x - 0.5) - 0.165, vUV.y - 0.635);
+  vec2 lq = vec2(abs(vUV.x - 0.5) - 0.166, vUV.y - 0.636);
   vec2 lf = lens(lq, side);
-  float ld = lf.x / max(fwidth(lf.x), 1e-5) * uvpp;     // ~distance to the lens edge, UV units
+  float ld = lf.x / max(fwidth(lf.x), 1e-5) * uvpp;     // ~ distance to the lens edge, UV units
   float aa = uvpp;
-  vec3 white = mix(vec3(0.78, 0.83, 0.97), vec3(1.0), smoothstep(-1.0, 0.8, lf.y));
-  vec3 ink = vec3(0.01, 0.01, 0.02), red = vec3(0.88, 0.1, 0.2);
-  vec3 lc = mix(white, ink, smoothstep(-aa, aa, ld));
-  lc = mix(lc, red, smoothstep(0.004 - aa, 0.004 + aa, ld));
-  lc = mix(lc, ink, smoothstep(0.016 - aa, 0.016 + aa, ld));
-  col = mix(lc, col, smoothstep(0.021 - aa, 0.021 + aa, ld));
+  float inLens = 1.0 - smoothstep(-aa, aa, ld);
+  float frame = smoothstep(-aa, aa, ld) * (1.0 - smoothstep(0.016 - aa, 0.016 + aa, ld));
+  float rim = smoothstep(0.016 - aa, 0.016 + aa, ld) * (1.0 - smoothstep(0.027 - aa, 0.027 + aa, ld));
+  vec3 lensAlb = mix(vec3(0.74, 0.77, 0.84), vec3(0.93, 0.94, 0.96), smoothstep(-1.0, 0.6, lf.y));
+  alb = mix(alb, vec3(0.012), frame);
+  alb = mix(alb, vec3(0.62, 0.035, 0.05), rim);
+  alb = mix(alb, lensAlb, inLens);
 
-  // hood: soft rim where it wraps away from you
-  float al = 1.0 - smoothstep(0.8, 1.0, vEdge);
-  al *= mix(1.0, smoothstep(0.0, 0.25, facing), smoothstep(0.45, 0.7, vEdge));
-  outColor = vec4(col, al * m * uAlpha);
+  // light it with the light that is on your real face (skin albedo ~0.36)
+  float E = max(uLight.w + dot(uLight.xyz, N), 0.0) + 0.1 * uLight.w;
+  vec3 col = alb * E / 0.36;
+  vec3 Ld = normalize(uLight.xyz + vec3(0.0, -1e-4, -1e-4));
+  vec3 Hh = normalize(Ld + vec3(0.0, 0.0, -1.0));
+  float ndh = max(dot(N, Hh), 0.0);
+  float ls = length(uLight.xyz) + 0.35 * uLight.w;
+  float spec = pow(ndh, 12.0) * 0.035 + pow(ndh, 48.0) * 0.12;           // spandex sheen
+  spec = mix(spec, pow(ndh, 30.0) * 0.55 + 0.03, inLens);               // lenses are glossy
+  col += vec3(0.75, 0.82, 1.0) * spec * ls * (1.0 - 0.6 * frame);
+  col += vec3(0.3, 0.38, 0.75) * pow(1.0 - facing, 3.0) * uLight.w * 0.3; // blue sheen where the fabric turns away
+
+  vec3 g = pow(max(col, 0.0), vec3(1.0 / 2.2));
+  g += (hash12(p + fract(uTime * 7.31) * 113.0) - 0.5) * 0.03;          // camera grain, like the real video
+  outColor = vec4(max(g, 0.0) * alpha, alpha);
 }`;
 
 // canonical face model (data block at the bottom of the page) + the hood rings around it
@@ -551,32 +606,51 @@ const FM = (() => {
     const l = Math.hypot(nrm[k], nrm[k + 1], nrm[k + 2]) || 1;
     nrm[k] *= flip / l; nrm[k + 1] *= flip / l; nrm[k + 2] *= flip / l;
   }
-  // hood: rings from the face outline out to a head-sized ellipsoid (cm), then around the back
-  const HC = [0, 1.5, -2.0], HR = [8.4, 11.8, 10.0], WEB = [0.5, 0.585];
-  const hood = new Float32Array(3 * NO * 3);
-  const attr = new Float32Array(NV * 6);
-  for (let i = 0; i < NF; i++) attr.set([uv[2 * i], uv[2 * i + 1], nrm[3 * i], nrm[3 * i + 1], nrm[3 * i + 2], 0], i * 6);
-  const ellN = (x, y, z) => {
-    const n = [(x - HC[0]) / HR[0] ** 2, (y - HC[1]) / HR[1] ** 2, (z - HC[2]) / HR[2] ** 2];
-    const l = Math.hypot(...n) || 1; return n.map((v) => v / l);
-  };
-  FACE_OVAL.forEach((o, j) => {
-    const O = [pos[3 * o], pos[3 * o + 1], pos[3 * o + 2]];
-    const dx = O[0] - HC[0], dy = O[1] - HC[1], len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
-    const tS = Math.max(1 / Math.hypot(ux / HR[0], uy / HR[1]), len + 1.2);
-    const tA = len + (tS - len) * 0.5;
-    const rings = [
-      [HC[0] + ux * tA, HC[1] + uy * tA, O[2] + (HC[2] - O[2]) * 0.5],
-      [HC[0] + ux * tS, HC[1] + uy * tS, HC[2]],
-      [HC[0] + ux * tS * 0.8, HC[1] + uy * tS * 0.8, HC[2] - 0.6 * HR[2]],
-    ];
-    rings.forEach((pt, k) => {
-      hood.set(pt, (k * NO + j) * 3);
-      let n = ellN(...pt);
-      if (k === 0) { n = n.map((v, c) => v + nrm[3 * o + c]); const l = Math.hypot(...n); n = n.map((v) => v / l); }
-      const f = [1.2, 1.42, 1.65][k];
-      attr.set([WEB[0] + (uv[2 * o] - WEB[0]) * f, WEB[1] + (uv[2 * o + 1] - WEB[1]) * f, ...n, (k + 1) / 3], (NF + k * NO + j) * 6);
+  // hood = 3 rings from the face outline out to a head-sized ellipsoid (cm), then around the back.
+  //   tight: used on its own, fades out at the edge
+  //   wide:  bigger + runs down the neck; the head segmentation then trims it to your real outline
+  const makeHood = (HC, HR, minExt, neck) => {
+    const hood = new Float32Array(3 * NO * 3), hn = new Float32Array(3 * NO * 3);
+    const ellN = (x, y, z) => {
+      const n = [(x - HC[0]) / HR[0] ** 2, (y - HC[1]) / HR[1] ** 2, (z - HC[2]) / HR[2] ** 2];
+      const l = Math.hypot(...n) || 1; return n.map((v) => v / l);
+    };
+    FACE_OVAL.forEach((o, j) => {
+      const O = [pos[3 * o], pos[3 * o + 1], pos[3 * o + 2]];
+      const dx = O[0] - HC[0], dy = O[1] - HC[1], len = Math.hypot(dx, dy), ux = dx / len, uy = dy / len;
+      let tS = Math.max(1 / Math.hypot(ux / HR[0], uy / HR[1]), len + minExt);
+      tS += neck * Math.max(0, -uy - 0.25) / 0.75;
+      const tA = len + (tS - len) * 0.5;
+      const pt = (t, z) => {
+        let x = HC[0] + ux * t;
+        const y = HC[1] + uy * t;
+        if (neck && y < O[1]) x = Math.sign(x) * Math.min(Math.abs(x), Math.max(Math.abs(O[0]), 7.5));   // neck, not shoulders
+        return [x, y, z];
+      };
+      const rings = [pt(tA, O[2] + (HC[2] - O[2]) * 0.5), pt(tS, HC[2]), pt(tS * 0.8, HC[2] - 0.6 * HR[2])];
+      rings.forEach((P, k) => {
+        hood.set(P, (k * NO + j) * 3);
+        let n = ellN(...P);
+        if (k === 0) { n = n.map((v, c) => v + nrm[3 * o + c]); const l = Math.hypot(...n); n = n.map((v) => v / l); }
+        hn.set(n, (k * NO + j) * 3);
+      });
     });
+    return { hood, hn };
+  };
+  const tight = makeHood([0, 1.5, -2.0], [8.4, 11.8, 10.0], 1.2, 0);
+  const wide = makeHood([0, 1.5, -2.5], [10.0, 13.6, 11.0], 2.5, 10);
+
+  const WEB = [0.5, 0.585];
+  const attr = new Float32Array(NV * 7);
+  for (let i = 0; i < NF; i++) attr.set([uv[2 * i], uv[2 * i + 1], nrm[3 * i], nrm[3 * i + 1], nrm[3 * i + 2], 0, 0], i * 7);
+  FACE_OVAL.forEach((o, j) => {
+    for (let k = 0; k < 3; k++) {
+      const f = [1.2, 1.42, 1.65][k], h = (k * NO + j) * 3;
+      const dy = pos[3 * o + 1] - 1.5, dx = pos[3 * o], uy = dy / Math.hypot(dx, dy);
+      const neck = Math.min(1, Math.max(0, (-uy - 0.3) / 0.4)) * [0.6, 1, 1][k];
+      attr.set([WEB[0] + (uv[2 * o] - WEB[0]) * f, WEB[1] + (uv[2 * o + 1] - WEB[1]) * f,
+        wide.hn[h], wide.hn[h + 1], wide.hn[h + 2], (k + 1) / 3, neck], (NF + k * NO + j) * 7);
+    }
   });
   const idx = new Uint16Array(tri.length + 3 * NO * 6);
   idx.set(tri);
@@ -585,6 +659,16 @@ const FM = (() => {
   for (let k = 0; k < 3; k++) for (let j = 0; j < NO; j++) {
     const a = ringV(k, j), b = ringV(k, j + 1), c = ringV(k + 1, j + 1), d = ringV(k + 1, j);
     idx.set([a, b, c, a, c, d], w); w += 6;
+  }
+  // plain-skin points (no eyes, brows, lips, nostrils, outline) for measuring the light on your face
+  const skinIdx = [], oval = new Set(FACE_OVAL);
+  for (let i = 0; i < NF; i++) {
+    const u = Math.abs(uv[2 * i] - 0.5), v = uv[2 * i + 1];
+    if (oval.has(i)) continue;
+    if (u > 0.06 && u < 0.31 && v > 0.55 && v < 0.79) continue;
+    if (u < 0.17 && v > 0.21 && v < 0.40) continue;
+    if (u < 0.09 && v > 0.40 && v < 0.49) continue;
+    skinIdx.push(i);
   }
   // least-squares fit canonical -> screen needs inverse(AᵀA), A rows = [x y z 1]
   const M = Array.from({ length: 4 }, () => new Float64Array(8));
@@ -600,19 +684,31 @@ const FM = (() => {
     for (let r = 0; r < 4; r++) if (r !== c) { const f = M[r][c]; for (let k = 0; k < 8; k++) M[r][k] -= f * M[c][k]; }
   }
   const Ginv = M.map((row) => Array.from(row.slice(4)));
-  return { NF, NO, NV, pos, hood, attr, idx, Ginv };
+  return { NF, NO, NV, pos, nrm, hoodTight: tight.hood, hoodWide: wide.hood, attr, idx, skinIdx, Ginv };
 })();
 
 // one face slot = smoothed landmarks + the mesh positions built from them
 const MAX_FACES = MOBILE ? 1 : 2;
-const FACE_MIN_CUTOFF = 1.5, FACE_BETA = 8;
+const FACE_MIN_CUTOFF = 2.0, FACE_BETA = 10;
 const faces = Array.from({ length: MAX_FACES }, () => ({
-  sm: new Float32Array(FM.NF * 3), raw: new Float32Array(FM.NF * 3), init: false, t: 0, cx: 0, cy: 0, v: 0,
-  nose: null, seenAt: -1e9, alpha: 0, ready: false,
+  sm: new Float32Array(FM.NF * 3), raw: new Float32Array(FM.NF * 3), prev: new Float32Array(FM.NF * 3),
+  init: false, t: 0, v: 0, nose: null, seenAt: -1e9, alpha: 0, ready: false,
   geo: new Float32Array(FM.NV * 3), rot: new Float32Array(9), open: [1, 1],
+  light: [-0.02, -0.05, -0.1, 0.12],
 }));
 let faceLm = null, facePromise = null, faceState = 'off', nFaces = 0, faceMs = 0;
 
+// head segmentation (hair / skin / clothes) so the mask covers exactly your head, not your hoodie or hands
+const SEG_MODEL_URL = 'https://storage.googleapis.com/mediapipe-models/image_segmenter/selfie_multiclass_256x256/float32/latest/selfie_multiclass_256x256.tflite';
+const IOS = /iPhone|iPad|iPod/i.test(navigator.userAgent) || (navigator.platform === 'MacIntel' && navigator.maxTouchPoints > 1);
+let segmenter = null, segPromise = null, segState = 'off', segMs = 0, segAt = -1e9;
+let segBuf = null, segCat = null, segW = 0, segH = 0, texSeg = null, frameNo = 0;
+const small = document.createElement('canvas');                       // small copy of each camera frame
+const smallCx = small.getContext('2d', { willReadFrequently: true });
+let smallPx = null;
+// hands, for keeping them in front of the mask
+const handPx = new Float32Array(84), handR = new Float32Array(2);
+let handN = 0;
 let U = {}, texV, texA, prog0, vao0, MP = null;
 function link(vs, fs) {
   const sh = (type, src) => {
@@ -629,24 +725,49 @@ function link(vs, fs) {
 }
 function initMaskGL() {
   const prog = link(MESH_VS, MESH_FS), u = {};
-  for (const n of ['uRes', 'uRot', 'uDepthScale', 'uQ', 'uMask', 'uFx', 'uFxPrev', 'uWipe', 'uDpr', 'uEyeOpen', 'uAlpha']) u[n] = gl.getUniformLocation(prog, n);
+  for (const n of ['uRes', 'uRot', 'uDepthScale', 'uVid', 'uMirror', 'uSeg', 'uSegOn', 'uHand', 'uHandR', 'uNHands',
+    'uEyeOpen', 'uAlpha', 'uLight', 'uTime']) u[n] = gl.getUniformLocation(prog, n);
+  gl.useProgram(prog); gl.uniform1i(u.uSeg, 3);
   const vao = gl.createVertexArray(); gl.bindVertexArray(vao);
   const posBuf = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, posBuf);
   gl.bufferData(gl.ARRAY_BUFFER, FM.NV * 12, gl.DYNAMIC_DRAW);
   gl.enableVertexAttribArray(0); gl.vertexAttribPointer(0, 3, gl.FLOAT, false, 0, 0);
   const st = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, st); gl.bufferData(gl.ARRAY_BUFFER, FM.attr, gl.STATIC_DRAW);
-  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 24, 0);
-  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 24, 8);
-  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 24, 20);
+  gl.enableVertexAttribArray(1); gl.vertexAttribPointer(1, 2, gl.FLOAT, false, 28, 0);
+  gl.enableVertexAttribArray(2); gl.vertexAttribPointer(2, 3, gl.FLOAT, false, 28, 8);
+  gl.enableVertexAttribArray(3); gl.vertexAttribPointer(3, 1, gl.FLOAT, false, 28, 20);
+  gl.enableVertexAttribArray(4); gl.vertexAttribPointer(4, 1, gl.FLOAT, false, 28, 24);
   const ib = gl.createBuffer(); gl.bindBuffer(gl.ELEMENT_ARRAY_BUFFER, ib); gl.bufferData(gl.ELEMENT_ARRAY_BUFFER, FM.idx, gl.STATIC_DRAW);
   gl.bindVertexArray(null);
-  MP = { prog, u, vao, posBuf };
+  // the mask is drawn into its own texture first; the spider effect then prints it with the rest of the frame
+  const fbo = gl.createFramebuffer(), tex = gl.createTexture(), depth = gl.createRenderbuffer();
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, tex);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+  texSeg = gl.createTexture();
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, texSeg);
+  for (const [k, v] of [[gl.TEXTURE_MIN_FILTER, gl.LINEAR], [gl.TEXTURE_MAG_FILTER, gl.LINEAR], [gl.TEXTURE_WRAP_S, gl.CLAMP_TO_EDGE], [gl.TEXTURE_WRAP_T, gl.CLAMP_TO_EDGE]]) gl.texParameteri(gl.TEXTURE_2D, k, v);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, 1, 1, 0, gl.RGBA, gl.UNSIGNED_BYTE, new Uint8Array([255, 0, 0, 255]));
+  gl.activeTexture(gl.TEXTURE0);
+  MP = { prog, u, vao, posBuf, fbo, tex, depth, w: 0, h: 0, on: false };
+}
+function sizeMaskFbo() {
+  if (!MP || (MP.w === W && MP.h === H)) return;
+  MP.w = W; MP.h = H;
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, MP.tex);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA8, W, H, 0, gl.RGBA, gl.UNSIGNED_BYTE, null);
+  gl.activeTexture(gl.TEXTURE0);
+  gl.bindRenderbuffer(gl.RENDERBUFFER, MP.depth);
+  gl.renderbufferStorage(gl.RENDERBUFFER, gl.DEPTH_COMPONENT16, W, H);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, MP.fbo);
+  gl.framebufferTexture2D(gl.FRAMEBUFFER, gl.COLOR_ATTACHMENT0, gl.TEXTURE_2D, MP.tex, 0);
+  gl.framebufferRenderbuffer(gl.FRAMEBUFFER, gl.DEPTH_ATTACHMENT, gl.RENDERBUFFER, MP.depth);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
 }
 
 function initGL() {
   const prog = prog0 = link(VS, FS);
   gl.useProgram(prog);
-  for (const n of ['uVideo', 'uAtlas', 'uRes', 'uVid', 'uMirror', 'uQ', 'uMask', 'uGlow', 'uFx', 'uTime', 'uCell', 'uGlyphs', 'uDpr', 'uFxPrev', 'uWipe']) {
+  for (const n of ['uVideo', 'uAtlas', 'uRes', 'uVid', 'uMirror', 'uQ', 'uMask', 'uGlow', 'uFx', 'uTime', 'uCell', 'uGlyphs', 'uDpr', 'uFxPrev', 'uWipe', 'uMaskTex', 'uMaskOn']) {
     U[n] = gl.getUniformLocation(prog, n);
   }
   vao0 = gl.createVertexArray(); gl.bindVertexArray(vao0);
@@ -660,7 +781,7 @@ function initGL() {
     return t;
   };
   texV = mk(gl.LINEAR); texA = mk(gl.NEAREST);
-  gl.uniform1i(U.uVideo, 0); gl.uniform1i(U.uAtlas, 1);
+  gl.uniform1i(U.uVideo, 0); gl.uniform1i(U.uAtlas, 1); gl.uniform1i(U.uMaskTex, 2);
   initMaskGL();
 }
 
@@ -692,6 +813,7 @@ function resize() {
   for (const c of [glc, ov]) { c.width = W; c.height = H; c.style.width = `${iw}px`; c.style.height = `${ih}px`; }
   gl.viewport(0, 0, W, H);
   buildAtlas();
+  sizeMaskFbo();
   spreadHist.length = 0;   // screen shape changed: old distances no longer comparable
 }
 function fitVideo() {
@@ -737,8 +859,9 @@ function ensureModel() {
   return modelPromise;
 }
 
-// face tracker: only downloaded once you pick the spider effect
+// face tracker + head segmenter: only downloaded once you pick the spider effect
 function ensureFace() {
+  ensureSeg();
   if (!facePromise) {
     faceState = 'loading';
     if (S.running) toast('loading the face tracker…');
@@ -760,9 +883,62 @@ function ensureFace() {
   }
   return facePromise;
 }
+function ensureSeg() {
+  if (!segPromise) {
+    segState = 'loading';
+    segPromise = (async () => {
+      const { mod: { ImageSegmenter }, fileset } = await visionBase();
+      const opts = (delegate) => ({
+        baseOptions: { modelAssetPath: SEG_MODEL_URL, delegate },
+        runningMode: 'VIDEO', outputCategoryMask: true, outputConfidenceMasks: false,
+      });
+      // iPhone Safari's GPU path mixes up this model's labels, so it runs on the CPU there
+      if (IOS) segmenter = await ImageSegmenter.createFromOptions(fileset, opts('CPU'));
+      else {
+        try { segmenter = await ImageSegmenter.createFromOptions(fileset, opts('GPU')); }
+        catch { segmenter = await ImageSegmenter.createFromOptions(fileset, opts('CPU')); }
+      }
+      segState = 'ready';
+    })().catch((e) => { console.warn(e); segPromise = null; segState = 'off'; });   // mask still works without it
+  }
+  return segPromise;
+}
 const faceWanted = (now) => S.fx === SPIDER || (wipe.prev === SPIDER && now - wipe.t0 < WIPE_MS);
 
-// landmarks -> smoothed screen points -> mask mesh
+// small copy of the camera frame: the segmenter's input, and where we read the light on your face
+function grabSmall() {
+  const vw = video.videoWidth || 16, vh = video.videoHeight || 9;
+  const w = 256, h = Math.max(16, Math.round(256 * vh / vw));
+  if (small.width !== w || small.height !== h) { small.width = w; small.height = h; }
+  smallCx.drawImage(video, 0, 0, w, h);
+  smallPx = smallCx.getImageData(0, 0, w, h).data;
+}
+
+// categories: 0 background, 1 hair, 2 body skin, 3 face skin, 4 clothes, 5 accessories
+function runSeg(tMs) {
+  const t0 = performance.now(), ts = tMs / 1000;
+  segmenter.segmentForVideo(small, tMs, (res) => {
+    const m = res.categoryMask;
+    if (!m) return;
+    const cat = m.getAsUint8Array(), w = m.width, h = m.height, n = w * h;
+    const fresh = !segBuf || segW !== w || segH !== h || ts - segAt > 0.5;
+    if (!segBuf || segBuf.length !== n * 4) { segBuf = new Uint8Array(n * 4); segCat = new Uint8Array(n); }
+    segW = w; segH = h; segCat.set(cat);
+    for (let i = 0, k = 0; i < n; i++, k += 4) {
+      const c = cat[i];
+      const v = [c === 1 || c === 5 ? 255 : 0, c === 2 ? 255 : 0, c === 4 ? 255 : 0, c === 3 ? 255 : 0];
+      for (let j = 0; j < 4; j++) segBuf[k + j] = fresh ? v[j] : (segBuf[k + j] + v[j]) >> 1;   // averaging calms the edges
+    }
+  });
+  if (!segBuf) return;
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, texSeg);
+  gl.texImage2D(gl.TEXTURE_2D, 0, gl.RGBA, segW, segH, 0, gl.RGBA, gl.UNSIGNED_BYTE, segBuf);
+  gl.activeTexture(gl.TEXTURE0);
+  segAt = ts;
+  segMs = segMs * 0.8 + (performance.now() - t0) * 0.2;
+}
+
+// landmarks -> smoothed screen points -> mask mesh (+ the light on that face)
 function processFaces(res, ts) {
   const list = res.faceLandmarks || [];
   nFaces = list.length;
@@ -790,29 +966,30 @@ function processFaces(res, ts) {
     smoothFace(slot, ts);
     slot.nose = { x: nx, y: ny }; slot.seenAt = ts;
     buildFaceMesh(slot);
+    fitLight(slot, lm);
   }
 }
 
-// one-euro smoothing, but with ONE cutoff for the whole face (from how fast the face moves),
-// so every point lags equally and the mask never warps while you move
+// one-euro smoothing with ONE cutoff for the whole face, driven by how fast its points move
+// (turning, talking, moving), so every point lags equally and the mask never warps
 function smoothFace(f, ts) {
   const raw = f.raw, n = raw.length;
-  let cx = 0, cy = 0;
-  for (let i = 0; i < n; i += 3) { cx += raw[i]; cy += raw[i + 1]; }
-  cx /= FM.NF; cy /= FM.NF;
   if (!f.init || ts - f.seenAt > 0.3) {
-    f.sm.set(raw); f.init = true; f.t = ts; f.cx = cx; f.cy = cy; f.v = 0; return;
+    f.sm.set(raw); f.prev.set(raw); f.init = true; f.t = ts; f.v = 0; return;
   }
   const dt = Math.max(1e-3, ts - f.t); f.t = ts;
-  const v = Math.hypot(cx - f.cx, cy - f.cy) / dt; f.cx = cx; f.cy = cy;
-  f.v += OneEuro.a(1, dt) * (v - f.v);
+  let mv = 0;
+  for (let i = 0; i < n; i += 3) mv += Math.abs(raw[i] - f.prev[i]) + Math.abs(raw[i + 1] - f.prev[i + 1]);
+  f.prev.set(raw);
+  f.v += OneEuro.a(1, dt) * (mv / FM.NF / dt - f.v);
   const a = OneEuro.a(FACE_MIN_CUTOFF + FACE_BETA * f.v, dt);
   const sm = f.sm;
   for (let i = 0; i < n; i++) sm[i] += a * (raw[i] - sm[i]);
 }
 
 function buildFaceMesh(f) {
-  const { NF, NO, pos, hood, Ginv } = FM, sm = f.sm, g = f.geo;
+  const { NF, NO, pos, Ginv } = FM, sm = f.sm, g = f.geo;
+  const hood = segmenter && segBuf ? FM.hoodWide : FM.hoodTight;
   for (let i = 0; i < NF; i++) {
     g[3 * i] = sm[3 * i] * W; g[3 * i + 1] = sm[3 * i + 1] * H; g[3 * i + 2] = sm[3 * i + 2] * Lay.dw;
   }
@@ -844,32 +1021,85 @@ function buildFaceMesh(f) {
   f.ready = true;
 }
 
-function drawMasks(maskV, wipeU, dt, nowS) {
+// measure the room light: brightness of your real skin vs. which way it faces.
+// fits  brightness = ambient + gradient·normal  (linear light), so the mask gets lit the same way
+function fitLight(f, lm) {
+  if (!smallPx) return;
+  const w = small.width, h = small.height, R = f.rot, { nrm } = FM;
+  const A = new Float64Array(16), B = new Float64Array(4);
+  let n = 0;
+  for (const i of FM.skinIdx) {
+    const p = lm[i];
+    if (p.x < 0 || p.x >= 1 || p.y < 0 || p.y >= 1) continue;
+    if (segCat && segCat.length === segW * segH && segCat[Math.floor(p.y * segH) * segW + Math.floor(p.x * segW)] !== 3) continue;   // a hand, hair…
+    const k = (Math.floor(p.y * h) * w + Math.floor(p.x * w)) * 4;
+    const lum = Math.pow((0.299 * smallPx[k] + 0.587 * smallPx[k + 1] + 0.114 * smallPx[k + 2]) / 255, 2.2);
+    const cx = nrm[3 * i], cy = nrm[3 * i + 1], cz = nrm[3 * i + 2];
+    let nx = R[0] * cx + R[3] * cy + R[6] * cz, ny = R[1] * cx + R[4] * cy + R[7] * cz, nz = R[2] * cx + R[5] * cy + R[8] * cz;
+    const l = Math.hypot(nx, ny, nz) || 1; nx /= l; ny /= l; nz /= l;
+    const row = [nx, ny, nz, 1];
+    for (let a = 0; a < 4; a++) { B[a] += row[a] * lum; for (let b = 0; b < 4; b++) A[a * 4 + b] += row[a] * row[b]; }
+    n++;
+  }
+  if (n < 40) return;
+  for (let d = 0; d < 3; d++) A[d * 4 + d] += 0.04 * n;    // keep it gentle when the head barely turns
+  const x = solve4(A, B);
+  if (!x) return;
+  let [gx, gy, gz, amb] = x;
+  amb = Math.min(1.2, Math.max(0.015, amb));
+  const gl2 = Math.hypot(gx, gy, gz), cap = 1.3 * amb;
+  if (gl2 > cap) { gx *= cap / gl2; gy *= cap / gl2; gz *= cap / gl2; }
+  const L = f.light, k = 0.25;
+  L[0] += (gx - L[0]) * k; L[1] += (gy - L[1]) * k; L[2] += (gz - L[2]) * k; L[3] += (amb - L[3]) * k;
+}
+function solve4(A, B) {
+  const M = [0, 1, 2, 3].map((r) => [A[r * 4], A[r * 4 + 1], A[r * 4 + 2], A[r * 4 + 3], B[r]]);
+  for (let c = 0; c < 4; c++) {
+    let pr = c; for (let r = c + 1; r < 4; r++) if (Math.abs(M[r][c]) > Math.abs(M[pr][c])) pr = r;
+    [M[c], M[pr]] = [M[pr], M[c]];
+    if (Math.abs(M[c][c]) < 1e-9) return null;
+    for (let r = 0; r < 4; r++) if (r !== c) { const f = M[r][c] / M[c][c]; for (let k = c; k < 5; k++) M[r][k] -= f * M[c][k]; }
+  }
+  return M.map((r, i) => r[4] / r[i]);
+}
+
+// render the mask(s) into their own texture; the spider effect composites + prints it
+function drawMasks(show, dt, nowS) {
   for (const f of faces) f.alpha += ((nowS - f.seenAt < 0.25 ? 1 : 0) - f.alpha) * Math.min(1, dt * 10);
-  if (!MP || maskV <= 0.001 || !faces.some((f) => f.ready && f.alpha > 0.01)) return;
+  MP.on = false;
+  if (!show || !faces.some((f) => f.ready && f.alpha > 0.01)) return;
+  sizeMaskFbo();
+  gl.bindFramebuffer(gl.FRAMEBUFFER, MP.fbo);
+  gl.viewport(0, 0, W, H);
+  gl.clearColor(0, 0, 0, 0); gl.clear(gl.COLOR_BUFFER_BIT | gl.DEPTH_BUFFER_BIT);
   gl.useProgram(MP.prog); gl.bindVertexArray(MP.vao);
+  gl.activeTexture(gl.TEXTURE3); gl.bindTexture(gl.TEXTURE_2D, texSeg); gl.activeTexture(gl.TEXTURE0);
   const u = MP.u;
   gl.uniform2f(u.uRes, W, H);
   gl.uniform1f(u.uDepthScale, 1 / (2 * Math.max(W, H)));
-  gl.uniform2fv(u.uQ, maskArr);
-  gl.uniform1f(u.uMask, maskV);
-  gl.uniform1i(u.uFx, S.fx);
-  gl.uniform1i(u.uFxPrev, wipe.prev);
-  gl.uniform4fv(u.uWipe, wipeU);
-  gl.uniform1f(u.uDpr, dpr);
+  gl.uniform4f(u.uVid, Lay.ox, Lay.oy, Lay.dw, Lay.dh);
+  gl.uniform1f(u.uMirror, S.mirror ? 1 : 0);
+  gl.uniform1f(u.uSegOn, segmenter && segBuf && nowS - segAt < 0.6 ? 1 : 0);
+  gl.uniform2fv(u.uHand, handPx);
+  gl.uniform2f(u.uHandR, handR[0], handR[1]);
+  gl.uniform1i(u.uNHands, handN);
+  gl.uniform1f(u.uTime, nowS % 1000);
   gl.enable(gl.DEPTH_TEST); gl.depthFunc(gl.LESS);
-  gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA);
+  gl.enable(gl.BLEND); gl.blendFunc(gl.ONE, gl.ONE_MINUS_SRC_ALPHA);    // premultiplied
   for (const f of faces) {
     if (!f.ready || f.alpha <= 0.01) continue;
     gl.clear(gl.DEPTH_BUFFER_BIT);
     gl.bindBuffer(gl.ARRAY_BUFFER, MP.posBuf); gl.bufferSubData(gl.ARRAY_BUFFER, 0, f.geo);
     gl.uniformMatrix3fv(u.uRot, false, f.rot);
     gl.uniform2f(u.uEyeOpen, f.open[0], f.open[1]);
+    gl.uniform4f(u.uLight, f.light[0], f.light[1], f.light[2], f.light[3]);
     gl.uniform1f(u.uAlpha, f.alpha);
     gl.drawElements(gl.TRIANGLES, FM.idx.length, gl.UNSIGNED_SHORT, 0);
   }
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND);
   gl.bindVertexArray(null);
+  gl.bindFramebuffer(gl.FRAMEBUFFER, null);
+  MP.on = true;
 }
 
 const filt = Array.from({ length: 8 }, () => new OneEuro(MIN_CUTOFF, BETA));
@@ -892,6 +1122,17 @@ function resetTracking() { filt.forEach((f) => f.reset()); prevWrists = null; }
 
 function processHands(res, ts) {
   snapPose(res.landmarks || [], ts * 1000);
+  // hand skeletons in screen px: anything skin-coloured near them is a hand, kept in front of the mask
+  handN = 0;
+  for (const lm of (res.landmarks || []).slice(0, 2)) {
+    for (let k = 0; k < 21; k++) {
+      const n = toN(lm[k]);
+      handPx[(handN * 21 + k) * 2] = n.x * W; handPx[(handN * 21 + k) * 2 + 1] = n.y * H;
+    }
+    const a = toN(lm[0]), b = toN(lm[9]);
+    handR[handN] = 0.25 * Math.hypot((a.x - b.x) * W, (a.y - b.y) * H);
+    handN++;
+  }
   const hs =(res.landmarks || []).map((lm) => ({ t: toN(lm[4]), i: toN(lm[8]), w: toN(lm[0]) }));
   nHands = hs.length;
   single = hs.length === 1 ? hs[0] : null;
@@ -1173,7 +1414,7 @@ function drawHud() {
   ];
   if (S.fx === SPIDER) {
     lines.push(faceState === 'ready'
-      ? `face_landmarker: ${nFaces} face${nFaces === 1 ? '' : 's'}  ${faceMs.toFixed(1)} ms  |  mask mesh ${FM.NV} verts, ${FM.idx.length / 3} tris  |  eyes ${faces[0].open.map((v) => v.toFixed(2)).join(' ')}`
+      ? `face_landmarker: ${nFaces} face${nFaces === 1 ? '' : 's'}  ${faceMs.toFixed(1)} ms  |  head_seg: ${segState === 'ready' ? `${segMs.toFixed(1)} ms` : segState}  |  mask ${FM.NV} verts  |  eyes ${faces[0].open.map((v) => v.toFixed(2)).join(' ')}  |  light ${faces[0].light.map((v) => v.toFixed(2)).join(' ')}`
       : `face_landmarker: ${faceState}…`);
   }
   const ready = performance.now() - snap.armedAt < 300 ? 'ready' : '-';
@@ -1218,14 +1459,21 @@ function frame(now) {
         processHands(res, t0 / 1000);
       } catch (e) { console.warn(e); }
     }
-    // face mesh for the spider mask (phones: every other camera frame, hands come first)
-    if (faceLm && faceWanted(now) && (!MOBILE || camFrames % 2 === 0)) {
-      const t1 = performance.now();
-      try {
-        const res = faceLm.detectForVideo(video, t1);
-        faceMs = faceMs * 0.8 + (performance.now() - t1) * 0.2;
-        processFaces(res, t1 / 1000);
-      } catch (e) { console.warn(e); }
+    // spider mask: face mesh + head segmentation (phones run them less often, hands come first)
+    if (faceWanted(now)) {
+      frameNo++;
+      const doFace = faceLm && (!MOBILE || frameNo % 2 === 0);
+      const doSeg = segmenter && frameNo % (MOBILE ? 4 : 2) === 1;
+      if (doFace || doSeg) grabSmall();
+      if (doSeg) { try { runSeg(performance.now()); } catch (e) { console.warn(e); } }
+      if (doFace) {
+        const t1 = performance.now();
+        try {
+          const res = faceLm.detectForVideo(video, t1);
+          faceMs = faceMs * 0.8 + (performance.now() - t1) * 0.2;
+          processFaces(res, t1 / 1000);
+        } catch (e) { console.warn(e); }
+      }
     }
   }
 
@@ -1245,10 +1493,14 @@ function frame(now) {
   const poly = maskPolygon(e);
   poly.forEach((p, i) => { maskArr[2 * i] = p.x; maskArr[2 * i + 1] = p.y; });
 
+  drawMasks(Math.max(presence, e) > 0.001 && faceWanted(now), dt, now / 1000);
+
   gl.useProgram(prog0); gl.bindVertexArray(vao0);
   gl.activeTexture(gl.TEXTURE0); gl.bindTexture(gl.TEXTURE_2D, texV);
   gl.activeTexture(gl.TEXTURE1); gl.bindTexture(gl.TEXTURE_2D, texA);
+  gl.activeTexture(gl.TEXTURE2); gl.bindTexture(gl.TEXTURE_2D, MP.tex);
   gl.activeTexture(gl.TEXTURE0);
+  gl.uniform1f(U.uMaskOn, MP.on ? 1 : 0);
   gl.uniform2f(U.uRes, W, H);
   gl.uniform4f(U.uVid, Lay.ox, Lay.oy, Lay.dw, Lay.dh);
   gl.uniform1f(U.uMirror, S.mirror ? 1 : 0);
@@ -1269,7 +1521,6 @@ function frame(now) {
   } else wipeU.set([0, 0, -1, 0]);
   gl.uniform4fv(U.uWipe, wipeU);
   gl.drawArrays(gl.TRIANGLES, 0, 3);
-  drawMasks(Math.max(presence, e), wipeU, dt, now / 1000);
 
   drawOverlay(presence, now);
 

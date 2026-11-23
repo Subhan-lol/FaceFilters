@@ -5,8 +5,9 @@ fingertip of each hand become the 4 corners of a glowing window, and everything 
 is rendered through a live effect.
 
 Effects: **ascii** (green matrix code), **comic** (ink outlines + halftone), **thermal**,
-**neon** (glowing edges), **pixel**, **spider** (comic-book multiverse look, and your face inside
-the portal becomes a web-slinger mask that turns, talks and blinks with you).
+**neon** (glowing edges), **pixel**, **spider** (comic-book multiverse look, and your whole head inside
+the portal becomes a black web-slinger mask with red web seams and white lenses that turns, talks and
+blinks with you).
 
 ## Run it
 
@@ -54,8 +55,15 @@ You can also drop a video file onto the page to run it through the portal instea
 - Corners smoothed with a one-euro filter
 - Effects are a single WebGL2 fragment shader, masked to the portal quad
 - Snap detection: high-passed mic transient + thumb-middle pinch pose
-- Spider mask: MediaPipe Face Landmarker gives 468 face points every frame; they are the vertices
-  of a 3D mesh (MediaPipe canonical face model, Apache-2.0) with a hood added around it. The web,
-  lenses and shading are drawn in the mesh's UV space, so the mask sticks to your face. The lenses
-  squint when you blink. The face model only downloads when you pick **spider**.
+- Spider mask:
+  - Face: MediaPipe Face Landmarker gives 468 face points every frame. They are the vertices of a 3D
+    mesh (MediaPipe canonical face model, Apache-2.0) with a hood and neck added around it. The web,
+    lenses and shading are drawn in the mesh's UV space, so the mask sticks to your face, and the
+    lenses squint when you blink.
+  - Whole head: MediaPipe's multiclass selfie segmenter (hair / skin / clothes) trims the hood to your real
+    head outline, covering your hair and ears. A hoodie stays in front of the mask, and hands in front
+    of your face stay visible.
+  - Lighting: the light on your real face is measured each frame (brightness vs. which way the skin
+    faces), and the mask is lit the same way, plus fabric sheen and camera grain.
+  - Both models only download when you pick **spider** (the segmenter is about 16 MB, once).
 - Everything is in `index.html`; no build step
